@@ -22,16 +22,18 @@ Frontend (React) → Backend (FastAPI) → DFIR Parsing Engine
 git clone https://github.com/rodelplasabas/sigil-dfir.git
 
 ### 2. Frontend
-
+```
 cd frontend
 npm install
 npm run dev
-
+```
 ### 3. Backend
 
+```
 cd backend
 pip install -r requirements.txt
 python -m uvicorn main:app --reload --port 8001
+```
 
 ## 📊 Supported Artifacts
 

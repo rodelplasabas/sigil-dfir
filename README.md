@@ -18,8 +18,9 @@ Frontend (React) → Backend (FastAPI) → DFIR Parsing Engine
 ## 🚀 Getting Started
 
 ### 1. Clone repo
-
+```
 git clone https://github.com/rodelplasabas/sigil-dfir.git
+```
 
 ### 2. Frontend
 ```

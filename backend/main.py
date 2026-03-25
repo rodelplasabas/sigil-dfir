@@ -3,13 +3,15 @@ SIGIL Backend v3.0 — DFIR Compromise Assessment Tool API
 Handles file parsing, detection rule execution, IOC matching, and rule management.
 """
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import tempfile
 import os
 import json
+from datetime import datetime
 
 from parser.evtx_parser import parse_evtx
 from parser.web_log_parser import parse_web_logs
@@ -21,6 +23,7 @@ from detection.rule_store import (
     reset_to_defaults, get_stats
 )
 from detection.sigma_importer import convert_sigma_to_rules
+from detection.report_generator import generate_report
 
 app = FastAPI(title="SIGIL DFIR Backend", version="3.0.0")
 
@@ -263,6 +266,16 @@ async def parse_artifact(file: UploadFile = File(...)):
     try:
         raw = await file.read()
         filename = file.filename or "unknown"
+
+        # Calculate file hashes
+        import hashlib
+        file_hashes = {
+            "md5": hashlib.md5(raw).hexdigest(),
+            "sha1": hashlib.sha1(raw).hexdigest(),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "file_size": len(raw),
+        }
+
         tmp_path = None
         if filename.lower().endswith((".evtx", ".evt")):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".evtx") as tmp:
@@ -275,7 +288,7 @@ async def parse_artifact(file: UploadFile = File(...)):
         result = parse_file(content, log_type, tmp_path, filename)
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
-        return {"status": "success", "filename": filename, **result}
+        return {"status": "success", "filename": filename, "hashes": file_hashes, **result}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -350,3 +363,33 @@ async def detect_only(
                 "rules_applied": len(rules) + (len(ioc_rules) if ioc_rules else 0)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ═══ REPORT GENERATION ═══
+
+@app.post("/report")
+async def generate_docx_report(request: Request):
+    """
+    Generate a DOCX report from findings.
+    Accepts raw JSON body with: case_meta, findings, overall_score, artifacts, ioc_list.
+    """
+    try:
+        data = await request.json()
+        buffer = generate_report(
+            case_meta=data.get("case_meta", {}),
+            findings=data.get("findings", []),
+            overall_score=data.get("overall_score", {}),
+            artifacts=data.get("artifacts", []),
+            ioc_list=data.get("ioc_list", []),
+        )
+        case_name = data.get("case_meta", {}).get("name", "sigil_report")
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in case_name).lower()
+        filename = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        import traceback
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")

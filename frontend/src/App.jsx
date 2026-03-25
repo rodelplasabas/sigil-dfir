@@ -1312,7 +1312,8 @@ export default function SigilDFIR() {
           parsedBackend: true,
           eventCount: data.event_count,
           events: data.events,
-          webLogFormat: data.format || "Unknown"
+          webLogFormat: data.format || "Unknown",
+          hashes: data.hashes || null
         }]);
         setBackendStatus("ok");
       } else {
@@ -1378,6 +1379,60 @@ export default function SigilDFIR() {
   const removeArtifact = useCallback((idx) => {
     setArtifacts(prev => prev.filter((_, i) => i !== idx));
   }, []);
+
+  const generateReport = useCallback(async () => {
+    try {
+      const payload = {
+        case_meta: caseMeta,
+        findings: findings.map(f => ({
+          id: f.id,
+          name: f.name,
+          description: f.description || "",
+          severity: f.severity,
+          confidence: f.confidence || 0,
+          mitre: f.mitre || [],
+          match_count: f.matchCount || 0,
+          keyword_hits: f.keywordHits || 0,
+          next_steps: f.nextSteps || [],
+          is_ioc_rule: f.isIocRule || false,
+          matched_events: (f.matchedEvents || []).slice(0, 10).map(e => ({
+            record_id: e.recordId || e.record_id || "",
+            event_id: e.eventId || e.event_id || "",
+            timestamp: e.timestamp || "",
+            content: (e.content || e.message || "").slice(0, 200),
+          })),
+        })),
+        overall_score: overallScore,
+        artifacts: artifacts.map(a => ({
+          name: a.name, log_type: a.logType, event_count: a.eventCount || 0,
+          hashes: a.hashes || null
+        })),
+        ioc_list: iocList,
+      };
+
+      const res = await fetch(`${backendUrl}/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Report generation failed");
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const safeName = (caseMeta.name || "sigil_report").replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+      a.download = `${safeName}_report.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert("Report generation failed: " + err.message);
+      console.error("Report error:", err);
+    }
+  }, [findings, overallScore, artifacts, caseMeta, iocList, backendUrl]);
 
   const runAnalysis = useCallback(async () => {
     setScanning(true);
@@ -2384,11 +2439,11 @@ export default function SigilDFIR() {
               <div className="modal-body">
                 <div className="form-group">
                   <label className="form-label">Case Name *</label>
-                  <input className="form-input" value={caseMeta.name} onChange={(e) => setCaseMeta(prev => ({ ...prev, name: e.target.value }))} placeholder="e.g. OWWA Webserver Compromise 2023" />
+                  <input className="form-input" value={caseMeta.name} onChange={(e) => setCaseMeta(prev => ({ ...prev, name: e.target.value }))} placeholder="e.g. Webserver Compromise Case" />
                 </div>
                 <div className="form-group">
                   <label className="form-label">Examiner</label>
-                  <input className="form-input" value={caseMeta.examiner} onChange={(e) => setCaseMeta(prev => ({ ...prev, examiner: e.target.value }))} placeholder="e.g. Rodel" />
+                  <input className="form-input" value={caseMeta.examiner} onChange={(e) => setCaseMeta(prev => ({ ...prev, examiner: e.target.value }))} placeholder="e.g. Examiner" />
                 </div>
                 <div className="form-group">
                   <label className="form-label">Description</label>
@@ -2849,6 +2904,9 @@ export default function SigilDFIR() {
                       {f !== "all" && ` (${findings.filter(x => x.severity === f).length})`}
                     </button>
                   ))}
+                  <button className="btn btn-primary" style={{ marginLeft: "auto", fontSize: 11, padding: "5px 14px", display: "inline-flex", alignItems: "center", gap: 6 }} onClick={generateReport}>
+                    <Icons.File /> Generate Report
+                  </button>
                 </div>
               )}
             </div>

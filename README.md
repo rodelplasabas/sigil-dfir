@@ -11,6 +11,17 @@ SIGIL is an open-source DFIR triage tool designed to help investigators quickly 
 * Confidence scoring system
 * IOC hunting support
 
+## 📸 Preview
+
+### Dashboard
+![Dashboard](docs/screenshots/dashboard.png)
+
+### Findings
+![Findings](docs/screenshots/findings.png)
+
+### Timeline Interface
+![Timeline](docs/screenshots/timeline.png)
+
 ## 🏗️ Architecture
 
 Frontend (React) → Backend (FastAPI) → DFIR Parsing Engine
@@ -21,7 +32,10 @@ Frontend (React) → Backend (FastAPI) → DFIR Parsing Engine
 ```
 git clone https://github.com/rodelplasabas/sigil-dfir.git
 ```
+<<<<<<< HEAD
 
+=======
+>>>>>>> 82bd226 (	modified:   README.md)
 ### 2. Frontend
 ```
 cd frontend
@@ -29,13 +43,19 @@ npm install
 npm run dev
 ```
 ### 3. Backend
+<<<<<<< HEAD
 
+=======
+>>>>>>> 82bd226 (	modified:   README.md)
 ```
 cd backend
 pip install -r requirements.txt
 python -m uvicorn main:app --reload --port 8001
 ```
+<<<<<<< HEAD
 
+=======
+>>>>>>> 82bd226 (	modified:   README.md)
 ## 📊 Supported Artifacts
 
 * Windows Event Logs (.evtx)

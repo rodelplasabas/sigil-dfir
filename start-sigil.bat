@@ -8,14 +8,14 @@ echo.
 
 :: Start the Python backend in a new window
 echo [*] Starting EVTX Parser Backend on port 8001...
-start "SIGIL Backend" cmd /k "cd /d %~dp0sigil-backend && python -m uvicorn main:app --reload --port 8001"
+start "SIGIL Backend" cmd /k "cd /d %~dp0backend && python -m uvicorn main:app --reload --port 8001"
 
 :: Give backend a moment to start
 timeout /t 2 /nobreak >nul
 
 :: Start the frontend in a new window
 echo [*] Starting SIGIL Frontend...
-start "SIGIL Frontend" cmd /k "cd /d %~dp0sigil-frontend && npm run dev"
+start "SIGIL Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
 
 :: Wait for frontend to be ready
 timeout /t 3 /nobreak >nul

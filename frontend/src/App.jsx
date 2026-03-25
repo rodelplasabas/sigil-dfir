@@ -1761,7 +1761,7 @@ const STYLES = `
     background: var(--bg-card);
     border: 1px solid var(--border-primary);
     border-radius: var(--radius-lg);
-    margin-top: 16px;
+    margin-top: 10px;
     margin-bottom: 16px;
     overflow: hidden;
   }
@@ -2142,6 +2142,7 @@ export default function SigilDFIR() {
         setArtifacts(prev => [...prev, {
           name: file.name,
           size: file.size,
+          file,
           content,
           logType: "windows_event_log",
           timestamp: Date.now(),
@@ -2161,7 +2162,7 @@ export default function SigilDFIR() {
       reader.onload = (e) => {
         const content = e.target.result;
         setArtifacts(prev => [...prev, {
-          name: file.name, size: file.size, content,
+          name: file.name, size: file.size, file, content,
           logType: "windows_event_log", timestamp: Date.now(),
           parsedBackend: false, fallback: true
         }]);
@@ -2196,7 +2197,7 @@ export default function SigilDFIR() {
           // Rebuild content with structured fields for better detection matching
           const structuredContent = parsedEvents.map(ev => ev.content).join("\n");
           setArtifacts(prev => [...prev, {
-            name: file.name, size: file.size,
+            name: file.name, size: file.size, file,
             content: structuredContent,
             logType, timestamp: Date.now(),
             parsedBackend: true,
@@ -2214,7 +2215,7 @@ export default function SigilDFIR() {
         }
       }
 
-      setArtifacts(prev => [...prev, { name: file.name, size: file.size, content, logType, timestamp: Date.now() }]);
+      setArtifacts(prev => [...prev, { name: file.name, size: file.size, file, content, logType, timestamp: Date.now() }]);
     };
     reader.readAsText(file);
   }, [parseEvtxViaBackend]);
@@ -2255,15 +2256,71 @@ export default function SigilDFIR() {
     setArtifacts(prev => prev.filter((_, i) => i !== idx));
   }, []);
 
-  const runAnalysis = useCallback(() => {
+  const runAnalysis = useCallback(async () => {
     setScanning(true);
     setFindings([]);
     setOverallScore(null);
     setExpandedFindings(new Set());
     setTimelinePage(0);
     setTimelineSevFilter("all");
-    setTimeout(() => {
-      // Build effective rules — inject IOC rules if enabled
+
+    const iocPayload = iocEnabled && iocList.length > 0 ? JSON.stringify(iocList) : null;
+    let allFindings = [];
+    let useBackend = false;
+
+    // Try backend-first for each artifact
+    try {
+      const backendResults = await Promise.all(
+        artifacts.filter(a => a.logType).map(async (artifact) => {
+          try {
+            // If artifact has raw file blob, send it to /analyze
+            if (artifact.file) {
+              const formData = new FormData();
+              formData.append("file", artifact.file);
+              if (iocPayload) formData.append("ioc_list", iocPayload);
+              formData.append("ioc_enabled", String(iocEnabled));
+              const res = await fetch(`${backendUrl}/analyze`, { method: "POST", body: formData });
+              const data = await res.json();
+              if (data.status === "success" && data.findings) {
+                useBackend = true;
+                // Map backend findings to frontend format
+                return data.findings.map(f => ({
+                  ...f,
+                  matchCount: f.match_count,
+                  keywordHits: f.keyword_hits,
+                  matchedEvents: (f.matched_events || []).map(e => ({
+                    ...e,
+                    eventId: e.event_id,
+                    recordId: e.record_id,
+                    structuredFields: e.fields
+                  })),
+                  nextSteps: f.next_steps,
+                  isIocRule: f.is_ioc_rule,
+                  source: artifact.name,
+                  logType: artifact.logType
+                }));
+              }
+            }
+          } catch (err) {
+            console.warn("Backend analyze failed for", artifact.name, err);
+          }
+          return null; // Will fall back to client-side
+        })
+      );
+
+      // Collect backend results
+      for (const result of backendResults) {
+        if (result) allFindings.push(...result);
+      }
+    } catch (err) {
+      console.warn("Backend analysis failed, falling back to client-side:", err);
+    }
+
+    // Fallback: client-side detection for artifacts that didn't get backend results
+    const backendProcessed = new Set(allFindings.map(f => f.source));
+    const unprocessed = artifacts.filter(a => a.logType && !backendProcessed.has(a.name));
+
+    if (unprocessed.length > 0) {
       let effectiveRules = { ...customRules };
       if (iocEnabled && iocList.length > 0) {
         const iocRules = buildIocRule();
@@ -2273,34 +2330,32 @@ export default function SigilDFIR() {
           }
         }
       }
-
-      let allFindings = [];
-      for (const artifact of artifacts) {
-        if (!artifact.logType) continue;
+      for (const artifact of unprocessed) {
         const af = runDetection(artifact.content, artifact.logType, effectiveRules, artifact.events || null);
         af.forEach(f => { f.source = artifact.name; f.logType = artifact.logType; });
         allFindings.push(...af);
       }
-      // Deduplicate by rule ID, keep the one with highest confidence and merge matchedEvents
-      const deduped = {};
-      for (const f of allFindings) {
-        const key = f.id;
-        if (!deduped[key] || f.confidence > deduped[key].confidence) {
-          if (deduped[key] && deduped[key].matchedEvents) {
-            f.matchedEvents = [...(f.matchedEvents || []), ...deduped[key].matchedEvents];
-          }
-          deduped[key] = f;
-        } else if (deduped[key]) {
-          deduped[key].matchedEvents = [...(deduped[key].matchedEvents || []), ...(f.matchedEvents || [])];
+    }
+
+    // Deduplicate by rule ID, merge matchedEvents
+    const deduped = {};
+    for (const f of allFindings) {
+      const key = f.id;
+      if (!deduped[key] || f.confidence > deduped[key].confidence) {
+        if (deduped[key] && deduped[key].matchedEvents) {
+          f.matchedEvents = [...(f.matchedEvents || []), ...deduped[key].matchedEvents];
         }
+        deduped[key] = f;
+      } else if (deduped[key]) {
+        deduped[key].matchedEvents = [...(deduped[key].matchedEvents || []), ...(f.matchedEvents || [])];
       }
-      const final = Object.values(deduped).sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity) || b.confidence - a.confidence);
-      setFindings(final);
-      setOverallScore(computeOverallScore(final));
-      setScanning(false);
-      if (final.length > 0) setExpandedFindings(new Set([final[0].id]));
-    }, 1800);
-  }, [artifacts, customRules, iocEnabled, iocList]);
+    }
+    const final = Object.values(deduped).sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity) || b.confidence - a.confidence);
+    setFindings(final);
+    setOverallScore(computeOverallScore(final));
+    setScanning(false);
+    if (final.length > 0) setExpandedFindings(new Set([final[0].id]));
+  }, [artifacts, customRules, iocEnabled, iocList, backendUrl]);
 
   const toggleFinding = (id) => {
     setExpandedFindings(prev => {

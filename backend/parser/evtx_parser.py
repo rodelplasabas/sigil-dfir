@@ -4,12 +4,12 @@ import xml.etree.ElementTree as ET
 NAMESPACE = {'ns': 'http://schemas.microsoft.com/win/2004/08/events/event'}
 
 
-def parse_evtx(file_path, max_records=5000):
+def parse_evtx(file_path, max_records=0):
     events = []
 
     with Evtx(file_path) as log:
         for i, record in enumerate(log.records()):
-            if i >= max_records:
+            if max_records > 0 and i >= max_records:
                 break
 
             try:

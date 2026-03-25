@@ -34,816 +34,6 @@ const MITRE_TECHNIQUES = {
   T1083: { id: "T1083", name: "File and Directory Discovery", tactic: "Discovery", url: "https://attack.mitre.org/techniques/T1083/" },
 };
 
-// ─── SIGMA-LIKE DETECTION RULES ──────────────────────────────────────────────
-const DETECTION_RULES = {
-  windows_event_log: [
-    {
-      id: "WIN-001",
-      name: "Brute Force Login Attempts",
-      description: "Detects multiple failed login attempts (Event ID 4625) from the same source within a short window, indicative of brute-force or password spraying attacks.",
-      severity: "high",
-      mitre: ["T1110"],
-      pattern: /EventID[:\s]*4625/gi,
-      altPatterns: [/event[_\s]?id[:\s="]*4625/gi, /logon[_\s]?type[:\s="]*(?:3|10)/gi, /an account failed to log on/gi],
-      keywords: ["failed", "logon", "audit failure"],
-      nextSteps: [
-        "Correlate source IPs with known threat intelligence feeds",
-        "Check if any 4624 (successful logon) follows the failed attempts",
-        "Review account lockout policies and recent lockout events (4740)",
-        "Investigate targeted accounts for privilege level and exposure"
-      ]
-    },
-    {
-      id: "WIN-002",
-      name: "New Service Installation",
-      description: "Detects installation of new Windows services (Event ID 7045/4697), commonly used for persistence or privilege escalation via malicious service creation.",
-      severity: "high",
-      mitre: ["T1543", "T1569"],
-      pattern: /EventID[:\s]*(?:7045|4697)/gi,
-      altPatterns: [/a (?:new )?service was installed/gi, /service\s+file\s+name/gi, /event[_\s]?id[:\s="]*(?:7045|4697)/gi],
-      keywords: ["service", "installed", "service file name"],
-      nextSteps: [
-        "Verify service binary path and check against known-good baselines",
-        "Analyze the service executable with hash lookups (VirusTotal)",
-        "Check if the service runs as SYSTEM or with elevated privileges",
-        "Review who created the service and from which process"
-      ]
-    },
-    {
-      id: "WIN-003",
-      name: "Event Log Cleared",
-      description: "Detects clearing of Windows event logs (Event ID 1102/104), a strong indicator of anti-forensic activity by adversaries attempting to cover their tracks.",
-      severity: "critical",
-      mitre: ["T1070"],
-      pattern: /EventID[:\s]*(?:1102|1100)\b/gi,
-      altPatterns: [/event[_\s]?id[:\s="]*1102/gi, /audit\s*log\s*(?:was\s*)?clear/gi, /event\s*log\s*(?:was\s*)?clear/gi, /the (?:audit|event) log was cleared/gi],
-      keywords: ["cleared", "audit log", "log was cleared"],
-      nextSteps: [
-        "CRITICAL: Preserve all remaining logs immediately",
-        "Check backup log sources (SIEM, Syslog forwarding, WEC)",
-        "Investigate timeline around the clearing event for lateral movement",
-        "Identify the account and process that performed the clearing"
-      ]
-    },
-    {
-      id: "WIN-004",
-      name: "Suspicious PowerShell Execution",
-      description: "Detects encoded PowerShell commands, bypass flags, download cradles, and obfuscated payloads commonly used in fileless malware attacks. Covers both command-line arguments and ScriptBlock logging (Event ID 4104) content.",
-      severity: "critical",
-      mitre: ["T1059", "T1027"],
-      pattern: /(?:powershell|pwsh).*(?:-enc|-encoded|bypass|hidden|downloadstring|\biex\b|invoke-expression|webclient|Net\.WebClient|bitstransfer|start-bitstransfer)/gi,
-      altPatterns: [
-        /EventID[:\s]*(?:4104|4103).*(?:script\s*block|creating\s*scriptblock)/gi,
-        /creating\s*scriptblock\s*text/gi,
-        /frombase64string/gi,
-        /\$EncodedCompressedFile/gi,
-        /encodedcompressed/gi,
-        /IO\.Compression/gi,
-        /IO\.MemoryStream/gi,
-        /System\.Convert.*FromBase64/gi,
-        /\[Convert\]::FromBase64String/gi,
-        /IO\.StreamReader/gi,
-        /Reflection\.Assembly/gi,
-        /DeflateStream|GZipStream/gi,
-        /New-Object\s+(?:System\.)?(?:Net\.WebClient|IO\.)/gi,
-        /Invoke-(?:WebRequest|RestMethod|Expression)/gi,
-        /(?:Start-BitsTransfer|certutil.*-urlcache)/gi,
-        /(?:\bIEX\b|\bsal\b|Set-Alias)\s*(?:\(|{|\$)/gi
-      ],
-      keywords: ["powershell", "encoded", "bypass", "downloadstring", "invoke-expression", "scriptblock", "EncodedCompressedFile", "FromBase64String", "MemoryStream", "Compression", "creating scriptblock"],
-      nextSteps: [
-        "Decode any Base64-encoded command blocks for analysis",
-        "Check for compressed/deflated payloads (GZip/Deflate streams)",
-        "Review ScriptBlock Event ID 4104 logs for full reconstructed script",
-        "Identify parent process and execution chain via Event ID 4688",
-        "Search for downloaded payloads in temp directories and user profiles",
-        "Check if ScriptBlock fragments span multiple event records (look for sequential Record IDs)"
-      ]
-    },
-    {
-      id: "WIN-011",
-      name: "Obfuscated PowerShell ScriptBlock",
-      description: "Detects PowerShell ScriptBlock logging events (4104) containing encoded/compressed payloads, reflection-based assembly loading, or shellcode injection — strong indicators of staged malware delivery or fileless execution. Only triggers on PowerShell provider logs to avoid false positives from BITS, Chrome, or other services.",
-      severity: "critical",
-      mitre: ["T1059", "T1027", "T1105"],
-      providerFilter: /powershell|microsoft-windows-powershell|4104|4103|scriptblock/i,
-      providerExclude: /bits-client|bits|chrome|update|wuauserv/i,
-      pattern: /\$(?:Encoded(?:Compressed)?File|enc(?:oded)?(?:Cmd|Command|Payload|Data|Script|Block|Buf(?:fer)?)?)\s*=\s*['"@]/gi,
-      altPatterns: [
-        /EventID[:\s]*4104.*[A-Za-z0-9+\/]{100,}/gi,
-        /(?:creating\s*scriptblock).*(?:[A-Za-z0-9+\/]{60,})/gi,
-        /\[(?:System\.)?Reflection\.Assembly\]::Load/gi,
-        /\[(?:System\.)?Runtime\.InteropServices\.Marshal\]/gi,
-        /(?:Invoke-(?:Obfuscation|Encode|CradleCrafter))/gi,
-        /(?:char\s*\[\s*\]|join|replace).*(?:\(\d{2,3}\s*,?\s*){4,}/gi,
-        /-bxor|-band\s+0x/gi,
-        /Add-Type\s+.*-TypeDefinition/gi,
-        /\$(?:DoIt|var_code|shellcode|buf|payload)\s*=/gi,
-        /VirtualAlloc|VirtualProtect|CreateThread|NtAllocateVirtualMemory/gi,
-        /Get-ItemProperty\s+-Path\s+Registry::/gi,
-        /IO\.Compression.*FromBase64/gi,
-        /IO\.MemoryStream.*Convert/gi,
-        /\[Convert\]::FromBase64String/gi,
-        /DeflateStream|GZipStream/gi
-      ],
-      keywords: ["EncodedCompressedFile", "FromBase64", "MemoryStream", "Reflection.Assembly", "DeflateStream", "GZipStream", "scriptblock", "VirtualAlloc", "shellcode", "Add-Type"],
-      nextSteps: [
-        "CRITICAL: Extract and decode the full Base64 payload for malware analysis",
-        "Reconstruct fragmented ScriptBlocks across sequential Event Record IDs",
-        "Check for in-memory .NET assembly loading (fileless malware indicator)",
-        "Submit decoded payload hash to VirusTotal / malware sandbox",
-        "Identify if payload performs registry persistence, credential theft, or C2",
-        "Correlate timestamps with network traffic for potential C2 beacon or data exfiltration"
-      ]
-    },
-    {
-      id: "WIN-005",
-      name: "Account Created / Privilege Escalation",
-      description: "Detects new account creation (4720) and users being added to privileged groups (4732/4728), which may indicate persistence via backdoor accounts.",
-      severity: "high",
-      mitre: ["T1136", "T1078"],
-      pattern: /EventID[:\s]*(?:4720|4732|4728)\b/gi,
-      altPatterns: [/event[_\s]?id[:\s="]*(?:4720|4732|4728)/gi, /user account was created/gi, /member was added.*(?:admin|group)/gi, /a (?:security-enabled )?(?:local|global) group.*member.*added/gi],
-      keywords: ["account created", "member added", "admin", "user account was created"],
-      nextSteps: [
-        "Verify the new account against authorized change requests",
-        "Check if account was added to Domain Admins or local Administrators",
-        "Review account attributes for anomalies (naming convention, SPN)",
-        "Correlate with preceding reconnaissance or lateral movement events"
-      ]
-    },
-    {
-      id: "WIN-006",
-      name: "RDP Lateral Movement",
-      description: "Detects Remote Desktop Protocol usage (Event ID 4624 LogonType 10, plus TerminalServices events) indicating potential lateral movement between systems.",
-      severity: "medium",
-      mitre: ["T1021"],
-      pattern: /EventID[:\s]*4624.*logon\s*type[:\s]*10|logon\s*type[:\s]*10.*EventID[:\s]*4624|EventID[:\s]*1149/gi,
-      altPatterns: [/event[_\s]?id[:\s="]*4624.*logon\s*type.*10/gi, /remote\s*desktop.*logon/gi, /tslient/gi, /TerminalServices/gi],
-      keywords: ["logon type 10", "rdp", "remote desktop", "terminal services"],
-      nextSteps: [
-        "Map source-to-destination RDP sessions for lateral movement path",
-        "Check for unusual source workstations or off-hours access",
-        "Verify RDP was expected and authorized for each account",
-        "Look for evidence of pass-the-hash or credential reuse"
-      ]
-    },
-    {
-      id: "WIN-007",
-      name: "Credential Dumping Activity",
-      description: "Detects indicators of credential dumping tools (Mimikatz, ProcDump targeting LSASS, comsvcs.dll MiniDump) used to extract passwords and hashes from memory.",
-      severity: "critical",
-      mitre: ["T1003"],
-      pattern: /(?:mimikatz|sekurlsa|lsass.*(?:dump|procdump|minidump)|comsvcs.*minidump|ntds\.dit)/gi,
-      altPatterns: [/(?:4688|1).*(?:procdump|sqldumper).*lsass/gi, /privilege.*debug/gi],
-      keywords: ["mimikatz", "lsass", "procdump", "sekurlsa", "ntds.dit", "credential", "dump"],
-      nextSteps: [
-        "CRITICAL: Assume all credentials on the host are compromised",
-        "Initiate password reset for all accounts that were logged on",
-        "Check for NTDS.dit exfiltration if a Domain Controller is involved",
-        "Deploy Credential Guard or LSASS protection if not enabled"
-      ]
-    },
-    {
-      id: "WIN-008",
-      name: "Scheduled Task Creation",
-      description: "Detects creation of scheduled tasks (Event ID 4698/106) which are commonly used for persistence and execution of malicious payloads at specified intervals.",
-      severity: "medium",
-      mitre: ["T1053"],
-      pattern: /EventID[:\s]*4698\b/gi,
-      altPatterns: [/event[_\s]?id[:\s="]*4698/gi, /schtasks.*\/create/gi, /new.*scheduled.*task/gi, /task\s*(?:was\s*)?(?:registered|created)/gi],
-      keywords: ["schtasks", "scheduled task", "registered", "task was created"],
-      nextSteps: [
-        "Review the task action (command/script being executed)",
-        "Check task schedule frequency and trigger conditions",
-        "Verify task creator account and creation timestamp",
-        "Compare against baseline of known legitimate scheduled tasks"
-      ]
-    },
-    {
-      id: "WIN-009",
-      name: "Windows Firewall / Defender Disabled",
-      description: "Detects disabling of Windows Firewall or Defender (Event ID 5025/2003/5001), a common defense evasion technique before deploying payloads.",
-      severity: "critical",
-      mitre: ["T1562"],
-      pattern: /EventID[:\s]*(?:5025|5001)\b|firewall.*(?:stop|disable)|defender.*(?:disable|turned\s*off)|antimalware.*protection.*disabled/gi,
-      altPatterns: [/event[_\s]?id[:\s="]*(?:5025|5001)/gi, /windows\s*defender.*disable/gi, /tamper\s*protection/gi, /real-time\s*protection.*off/gi],
-      keywords: ["firewall", "defender", "disabled", "stopped", "tamper protection", "antimalware"],
-      nextSteps: [
-        "Determine who/what process disabled the security controls",
-        "Check for subsequent malware execution or file drops",
-        "Re-enable protections and investigate the timeline",
-        "Search for Group Policy modifications that disable security"
-      ]
-    },
-    {
-      id: "WIN-010",
-      name: "Shadow Copy Deletion",
-      description: "Detects deletion of Volume Shadow Copies, a hallmark of ransomware operations that eliminate backup/recovery options before encrypting files.",
-      severity: "critical",
-      mitre: ["T1490", "T1486"],
-      pattern: /(?:vssadmin.*delete\s*shadows|wmic.*shadowcopy.*delete|bcdedit.*recoveryenabled.*no|wbadmin.*delete\s*catalog)/gi,
-      altPatterns: [/shadow\s*cop(?:y|ies).*delet/gi, /disable.*recovery/gi],
-      keywords: ["vssadmin", "shadowcopy", "delete shadows", "bcdedit", "recoveryenabled", "wbadmin"],
-      nextSteps: [
-        "CRITICAL: Likely pre-ransomware activity — isolate host immediately",
-        "Check for encryption of files (.locked, .encrypted, ransom notes)",
-        "Preserve network traffic logs for C2 and exfiltration evidence",
-        "Engage incident response team and consider disconnecting from network"
-      ]
-    }
-  ],
-  web_server_log: [
-    {
-      id: "WEB-001",
-      name: "SQL Injection Attempts",
-      description: "Detects common SQL injection payloads in web request URIs and parameters, indicating active exploitation attempts against database-backed applications.",
-      severity: "high",
-      mitre: ["T1190"],
-      pattern: /(?:union\s+select|or\s+1\s*=\s*1|'\s*or\s*'|;\s*drop\s+table|waitfor\s+delay|benchmark\s*\(|sleep\s*\(|1\s*=\s*1\s*--|0x[0-9a-f]{8,})/gi,
-      altPatterns: [/(?:concat|char|0x).*(?:select|from|where)/gi, /information_schema/gi],
-      keywords: ["union select", "or 1=1", "drop table", "waitfor", "benchmark", "sleep", "information_schema"],
-      nextSteps: [
-        "Identify targeted parameter and application endpoint",
-        "Check for successful injection (HTTP 200 with unexpected data)",
-        "Review WAF logs for bypassed or allowed requests",
-        "Audit the application code for parameterized query usage"
-      ]
-    },
-    {
-      id: "WEB-002",
-      name: "Web Shell Access",
-      description: "Detects access to known web shell filenames and patterns commonly planted after successful exploitation for persistent remote access.",
-      severity: "critical",
-      mitre: ["T1505"],
-      pattern: /(?:cmd\.(?:asp|php|jsp)|shell\.(?:php|asp)|c99|r57|b374k|alfa\.php|(?:web)?shell|eval\s*\(\s*(?:base64_decode|gzinflate|\$_(?:POST|GET|REQUEST)))/gi,
-      altPatterns: [/(?:POST|GET).*(?:cmd|exec|system|passthru)\s*=/gi, /php.*(?:eval|assert|preg_replace.*\/e)/gi],
-      keywords: ["webshell", "cmd.php", "c99", "r57", "b374k", "eval", "base64_decode", "passthru"],
-      nextSteps: [
-        "CRITICAL: Isolate the web server and preserve the shell file",
-        "Calculate file hash and check against threat intelligence",
-        "Review upload timestamps and web logs for initial access vector",
-        "Search for additional shells — attackers often plant backups",
-        "Check file system for recently modified files outside deployment"
-      ]
-    },
-    {
-      id: "WEB-003",
-      name: "Directory Traversal / LFI",
-      description: "Detects path traversal sequences (../../) and local file inclusion attempts targeting sensitive system files like /etc/passwd or win.ini.",
-      severity: "high",
-      mitre: ["T1190"],
-      pattern: /(?:\.\.\/|\.\.\\|%2e%2e%2f|%2e%2e\/|\.\.%2f){2,}|(?:\/etc\/(?:passwd|shadow|hosts)|\/proc\/self|win\.ini|boot\.ini|system32)/gi,
-      altPatterns: [/(?:include|require|fopen|file_get_contents).*\.\.\//gi],
-      keywords: ["../", "..\\", "etc/passwd", "etc/shadow", "win.ini", "proc/self", "traversal"],
-      nextSteps: [
-        "Check if traversal was successful (HTTP 200 with file contents)",
-        "Identify the vulnerable parameter and application module",
-        "Review for data exfiltration of sensitive files",
-        "Check for escalation to Remote File Inclusion (RFI)"
-      ]
-    },
-    {
-      id: "WEB-004",
-      name: "Suspicious User-Agent Strings",
-      description: "Detects scanner tools, exploit frameworks, and automated attack tools by their distinctive User-Agent signatures in web server logs.",
-      severity: "medium",
-      mitre: ["T1190", "T1105"],
-      pattern: /(?:nikto|sqlmap|nmap|masscan|dirbuster|gobuster|wfuzz|burpsuite|havij|acunetix|nessus|openvas|zgrab|nuclei|metasploit|cobalt\s*strike)/gi,
-      altPatterns: [/(?:python-requests|curl|wget|Go-http-client).*(?:\/admin|\/wp-|\/login)/gi],
-      keywords: ["nikto", "sqlmap", "nmap", "dirbuster", "gobuster", "burpsuite", "nuclei", "metasploit"],
-      nextSteps: [
-        "Identify scanning source IP and check reputation",
-        "Review all requests from that IP for successful exploitation",
-        "Check if any vulnerabilities were found and exploited",
-        "Implement rate limiting and WAF rules for scanner signatures"
-      ]
-    },
-    {
-      id: "WEB-005",
-      name: "Command Injection Attempts",
-      description: "Detects OS command injection payloads in web requests, attempting to execute system commands through vulnerable application parameters.",
-      severity: "critical",
-      mitre: ["T1059", "T1190"],
-      pattern: /(?:;\s*(?:ls|cat|id|whoami|wget|curl|nc|bash|sh|python|perl|ruby)\b|`[^`]*`|\$\([^)]*\)|\|\s*(?:bash|sh|cmd)|%0a(?:ls|id|cat|whoami))/gi,
-      altPatterns: [/(?:ping|nslookup|tracert).*(?:;|%0a|\|)/gi],
-      keywords: [";ls", "|bash", "whoami", "wget", "curl", "nc ", "netcat", "%0a", "command injection"],
-      nextSteps: [
-        "Determine if command execution was successful (check response)",
-        "Review for reverse shell or data exfiltration attempts",
-        "Identify the vulnerable endpoint and input vector",
-        "Check for follow-up requests indicating interactive shell access"
-      ]
-    },
-    {
-      id: "WEB-006",
-      name: "Excessive 4xx/5xx Error Rate",
-      description: "Detects high rates of client and server errors that may indicate active scanning, fuzzing, or exploitation attempts against the web application.",
-      severity: "medium",
-      mitre: ["T1190"],
-      pattern: /(?:HTTP\/\d\.\d"\s*(?:4[0-9]{2}|5[0-9]{2}))/g,
-      altPatterns: [/\s(?:400|401|403|404|405|500|502|503)\s/g],
-      keywords: ["400", "401", "403", "404", "500", "502", "503"],
-      countThreshold: 50,
-      nextSteps: [
-        "Analyze error distribution — 403s suggest access brute-forcing",
-        "High 500s may indicate successful but destructive injection",
-        "Correlate with specific source IPs for scanning behavior",
-        "Review targeted URLs for patterns (admin panels, API endpoints)"
-      ]
-    },
-    {
-      id: "WEB-007",
-      name: "PHP File in Upload/Storage Directory",
-      description: "Detects access to .php files inside upload, storage, temp, or media directories. Executable PHP files in these locations are a strong indicator of a planted web shell — legitimate uploads should be documents, images, or PDFs, not executable scripts.",
-      severity: "critical",
-      mitre: ["T1505", "T1190"],
-      pattern: /(?:GET|POST)\s+\/(?:[^\s]*\/)?(?:upload|storage|tmp|temp|media|files|documents|attachments|assets\/upload|public\/upload|var\/www)[^\s]*\.php\b/gi,
-      altPatterns: [
-        /\/storage\/[^\s]*\.php/gi,
-        /\/uploads?\/[^\s]*\.php/gi,
-        /\/tmp\/[^\s]*\.php/gi,
-        /\/media\/[^\s]*\.php/gi,
-        /\/attachments?\/[^\s]*\.php/gi,
-        /\/public\/[^\s]*\.php/gi
-      ],
-      keywords: ["storage", "upload", ".php", "public"],
-      nextSteps: [
-        "CRITICAL: Likely web shell — isolate server and preserve the file",
-        "Check the POST request that uploaded this file (look for form submissions)",
-        "Calculate file hash and analyze the PHP file contents",
-        "Identify which upload form was abused (certificate upload, avatar, document)",
-        "Check for path parameter manipulation (e.g., ?path= pointing to server paths)",
-        "Review all subsequent requests to this PHP file for C2 activity"
-      ]
-    },
-    {
-      id: "WEB-008",
-      name: "Randomized / Base64-like PHP Filename",
-      description: "Detects access to PHP files with unusually long, random-looking filenames (20+ alphanumeric characters), commonly used by attackers to evade filename-based detection when planting web shells.",
-      severity: "critical",
-      mitre: ["T1505", "T1027"],
-      pattern: /\/[A-Za-z0-9]{20,}\.php\b/gi,
-      altPatterns: [
-        /\/[A-Za-z0-9+\/]{30,}\.php/gi,
-        /\/[a-f0-9]{32,}\.php/gi
-      ],
-      keywords: [".php"],
-      nextSteps: [
-        "CRITICAL: Long random PHP filenames are a strong web shell indicator",
-        "Trace back the POST request that created this file",
-        "Check if the filename resembles Base64 encoding or MD5/SHA hash",
-        "Analyze the file content on disk for backdoor functionality",
-        "Search logs for all requests to this file — each one may be a C2 command",
-        "Check for other files with similar naming patterns in the same directory"
-      ]
-    },
-    {
-      id: "WEB-009",
-      name: "Server Path Disclosure in Parameters",
-      description: "Detects query parameters containing server filesystem paths (e.g., /var/www/, C:\\inetpub\\, /home/), which may indicate path traversal exploitation, web shell interaction, or misconfigured application exposing internal paths.",
-      severity: "high",
-      mitre: ["T1190", "T1083"],
-      pattern: /\?[^\s]*(?:path|file|dir|include|page|doc|template)\s*=\s*(?:\/var\/|\/home\/|\/tmp\/|\/etc\/|C:\\|\/usr\/|\/opt\/|\/www\/)[^\s&]*/gi,
-      altPatterns: [
-        /\?[^\s]*=\s*\/var\/www\//gi,
-        /\?[^\s]*=\s*C:\\(?:inetpub|windows|users)\\/gi,
-        /\?[^\s]*path=\s*\/[^\s&]*\//gi
-      ],
-      keywords: ["path=", "/var/www", "inetpub", "/home/", "file="],
-      nextSteps: [
-        "Check if the path parameter allowed access to unauthorized files",
-        "Determine if this is an LFI/RFI vulnerability being exploited",
-        "Review if the response contained sensitive file contents",
-        "Check for web shell interaction patterns (POST with path to shell file)"
-      ]
-    },
-    {
-      id: "WEB-010",
-      name: "POST to Upload Endpoint Followed by PHP Access",
-      description: "Detects POST requests to upload/form endpoints containing .php in the URI or followed by GET requests to .php files in storage paths. This pattern indicates potential web shell upload via application file upload functionality.",
-      severity: "critical",
-      mitre: ["T1505", "T1190"],
-      pattern: /POST\s+\/[^\s]*(?:upload|certificate|attachment|document|file|import|avatar|media|proof)[^\s]*\s+HTTP/gi,
-      altPatterns: [
-        /POST\s+\/api\/[^\s]*(?:upload|store|create|submit|save)[^\s]*.*HTTP\/[12]/gi,
-        /POST\s+\/[^\s]*\.php\?/gi,
-        /multipart\/form-data/gi
-      ],
-      keywords: ["POST", "upload", "multipart", "certificate", "attachment", "proof"],
-      nextSteps: [
-        "CRITICAL: Correlate this POST with subsequent GET requests to .php files",
-        "Check the upload form for file type validation bypass",
-        "Review the uploaded file on disk — check for PHP code in image/document uploads",
-        "Look for double extensions (.php.jpg, .phtml, .php5) or null byte injection",
-        "Identify if the upload path is web-accessible (can the file be executed?)",
-        "Check Content-Type headers for mismatches (e.g., application/octet-stream for supposed images)"
-      ]
-    }
-  ],
-  registry: [
-    {
-      id: "REG-001",
-      name: "Autorun / Persistence Keys Modified",
-      description: "Detects modifications to Windows Registry Run/RunOnce keys, a primary persistence mechanism used by malware to survive system reboots. Excludes CD/DVD Autoplay settings.",
-      severity: "high",
-      mitre: ["T1547", "T1112"],
-      providerExclude: /Autoplay\\|AutoplayHandlers|PolicyManager\\default\\Autoplay/i,
-      pattern: /(?:HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER)\\(?:Software\\Microsoft\\Windows\\CurrentVersion\\(?:Run(?:Once)?|Explorer\\(?:Shell\s*Folders|User\s*Shell\s*Folders))|Wow6432Node\\.*\\Run)/gi,
-      altPatterns: [/CurrentVersion\\Run(?:Once)?\]/gi, /CurrentVersion\\Run(?:Once)?\\[^\]]*=/gi],
-      keywords: ["CurrentVersion\\Run", "RunOnce", "Shell Folders"],
-      nextSteps: [
-        "List all values under the modified Run key",
-        "Verify each executable path against known-good baseline",
-        "Check file signatures and submit unknown binaries to sandbox",
-        "Review modification timestamps against incident timeline"
-      ]
-    },
-    {
-      id: "REG-002",
-      name: "Disabled Security Features via Registry",
-      description: "Detects registry modifications that disable UAC, Windows Defender, firewall, or other security features — a common defense evasion technique.",
-      severity: "critical",
-      mitre: ["T1562", "T1112"],
-      pattern: /(?:EnableLUA.*(?:0|dword:00000000)|DisableAntiSpyware.*(?:1|dword:00000001)|DisableRealtimeMonitoring|DisableAntiVirus|EnableFirewall.*(?:0|dword:00000000))/gi,
-      altPatterns: [/windows\s*defender\\.*disable/gi, /policies\\.*firewall/gi],
-      keywords: ["EnableLUA", "DisableAntiSpyware", "DisableRealtimeMonitoring", "EnableFirewall", "DisableAntiVirus"],
-      nextSteps: [
-        "CRITICAL: Re-enable security controls immediately",
-        "Identify the process/user that modified these values",
-        "Check for malware execution following the disabling",
-        "Audit Group Policy Objects for unauthorized changes"
-      ]
-    },
-    {
-      id: "REG-003",
-      name: "Suspicious Service Registration",
-      description: "Detects new or modified Windows service entries in the registry, which may indicate persistence through malicious service installation.",
-      severity: "high",
-      mitre: ["T1543"],
-      pattern: /(?:HKLM|HKEY_LOCAL_MACHINE)\\System\\(?:CurrentControlSet|ControlSet\d{3})\\Services\\/gi,
-      altPatterns: [/services\\.*imagepath/gi, /servicedll/gi],
-      keywords: ["CurrentControlSet\\Services", "ImagePath", "ServiceDll", "ControlSet"],
-      nextSteps: [
-        "Extract the ImagePath/ServiceDll value for the service",
-        "Verify the binary is signed and from a legitimate publisher",
-        "Check service creation timestamp vs incident timeline",
-        "Compare against known services baseline for the OS version"
-      ]
-    },
-    {
-      id: "REG-004",
-      name: "Image File Execution Options (IFEO) Hijack",
-      description: "Detects modifications to IFEO debugger keys, used to hijack legitimate process execution by redirecting them to malicious binaries.",
-      severity: "critical",
-      mitre: ["T1546"],
-      pattern: /Image\s*File\s*Execution\s*Options.*(?:Debugger|GlobalFlag)/gi,
-      altPatterns: [/ifeo/gi, /silent\s*process\s*exit/gi],
-      keywords: ["Image File Execution Options", "Debugger", "GlobalFlag", "IFEO", "SilentProcessExit"],
-      nextSteps: [
-        "Identify which process is being hijacked and the debugger path",
-        "This is a high-confidence indicator of compromise — escalate",
-        "Check for Accessibility Feature abuse (sethc.exe, utilman.exe)",
-        "Remove the Debugger value and investigate the malicious binary"
-      ]
-    },
-    {
-      id: "REG-005",
-      name: "Remote Desktop Enabled via Registry",
-      description: "Detects enabling of Remote Desktop Protocol through registry modification, potentially by attackers establishing remote access capability.",
-      severity: "medium",
-      mitre: ["T1021", "T1112"],
-      pattern: /(?:fDenyTSConnections.*(?:0|dword:00000000)|Terminal\s*Server\\.*fDenyTSConnections)/gi,
-      altPatterns: [/allow\s*remote\s*desktop/gi, /fDenyTSConnections/gi],
-      keywords: ["fDenyTSConnections", "Terminal Server", "Remote Desktop", "RDP", "TermService"],
-      nextSteps: [
-        "Verify if RDP was intentionally enabled by an administrator",
-        "Check firewall rules for port 3389 exposure",
-        "Review NLA (Network Level Authentication) settings",
-        "Monitor for incoming RDP connections from unexpected sources"
-      ]
-    }
-  ]
-};
-
-// ─── WEB ACCESS LOG PARSER ──────────────────────────────────────────────────
-function parseWebAccessLogs(rawContent) {
-  const lines = rawContent.split("\n");
-  const events = [];
-
-  // Apache/Nginx Combined Log Format:
-  // 192.168.1.1 - - [10/Oct/2023:13:55:36 +0000] "GET /index.html HTTP/1.1" 200 2326 "http://ref.com" "Mozilla/5.0..."
-  const apacheRe = /^(\S+)\s+(\S+)\s+(\S+)\s+\[([^\]]+)\]\s+"(\S+)\s+([^\s"]+)\s*([^"]*)"\s+(\d{3})\s+(\S+)(?:\s+"([^"]*)")?(?:\s+"([^"]*)")?/;
-
-  // IIS W3C Log Format:
-  // 2023-10-10 13:55:36 192.168.1.1 GET /index.html - 80 - 192.168.1.2 Mozilla/5.0... 200 0 0 125
-  // Fields vary but typically: date time s-ip cs-method cs-uri-stem cs-uri-query s-port cs-username c-ip cs(User-Agent) sc-status ...
-  const iisRe = /^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d{3})\b/;
-
-  // Detect if IIS W3C format by checking for #Fields header or date-first lines
-  const isIIS = lines.some(l => l.startsWith("#Fields:") || /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+/.test(l));
-
-  // Parse IIS field header if present
-  let iisFields = null;
-  for (const line of lines) {
-    if (line.startsWith("#Fields:")) {
-      iisFields = line.slice(8).trim().split(/\s+/);
-      break;
-    }
-  }
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line || line.startsWith("#")) continue;
-
-    let parsed = null;
-
-    if (isIIS) {
-      // Try IIS W3C parsing
-      if (iisFields) {
-        const parts = line.split(/\s+/);
-        if (parts.length >= iisFields.length - 1) {
-          const fieldMap = {};
-          iisFields.forEach((f, idx) => { if (parts[idx]) fieldMap[f] = parts[idx]; });
-          const dateStr = fieldMap["date"] || "";
-          const timeStr = fieldMap["time"] || "";
-          parsed = {
-            ip: fieldMap["c-ip"] || fieldMap["s-ip"] || "-",
-            timestamp: dateStr && timeStr ? `${dateStr}T${timeStr}Z` : dateStr,
-            method: fieldMap["cs-method"] || "-",
-            uri: fieldMap["cs-uri-stem"] || "-",
-            query: fieldMap["cs-uri-query"] || "-",
-            status: fieldMap["sc-status"] || "-",
-            size: fieldMap["sc-bytes"] || "-",
-            referer: fieldMap["cs(Referer)"] || "-",
-            userAgent: fieldMap["cs(User-Agent)"] || "-",
-            serverIp: fieldMap["s-ip"] || "-",
-            port: fieldMap["s-port"] || "-",
-            format: "IIS"
-          };
-        }
-      } else {
-        const m = line.match(iisRe);
-        if (m) {
-          parsed = {
-            ip: m[9] || m[3],
-            timestamp: `${m[1]}T${m[2]}Z`,
-            method: m[4],
-            uri: m[5],
-            query: m[6] !== "-" ? m[6] : "",
-            status: m[11],
-            size: "-",
-            referer: "-",
-            userAgent: m[10] || "-",
-            serverIp: m[3],
-            port: m[7],
-            format: "IIS"
-          };
-        }
-      }
-    }
-
-    if (!parsed) {
-      // Try Apache/Nginx Combined
-      const m = line.match(apacheRe);
-      if (m) {
-        // Parse Apache date: 10/Oct/2023:13:55:36 +0000 → ISO
-        let isoTimestamp = m[4];
-        try {
-          const dp = m[4].match(/(\d{2})\/(\w{3})\/(\d{4}):(\d{2}:\d{2}:\d{2})\s*([+-]\d{4})?/);
-          if (dp) {
-            const months = { Jan:"01", Feb:"02", Mar:"03", Apr:"04", May:"05", Jun:"06", Jul:"07", Aug:"08", Sep:"09", Oct:"10", Nov:"11", Dec:"12" };
-            isoTimestamp = `${dp[3]}-${months[dp[2]] || "01"}-${dp[1]}T${dp[4]}${dp[5] ? dp[5].slice(0,3) + ":" + dp[5].slice(3) : "+00:00"}`;
-          }
-        } catch {}
-
-        parsed = {
-          ip: m[1],
-          user: m[3],
-          timestamp: isoTimestamp,
-          method: m[5],
-          uri: m[6],
-          protocol: m[7],
-          status: m[8],
-          size: m[9],
-          referer: m[10] || "-",
-          userAgent: m[11] || "-",
-          format: "Apache/Nginx"
-        };
-      }
-    }
-
-    if (parsed) {
-      // Build a structured content line for detection matching
-      const fullUri = parsed.query && parsed.query !== "-" ? `${parsed.uri}?${parsed.query}` : parsed.uri;
-      const contentLine = [
-        `Timestamp: ${parsed.timestamp}`,
-        `IP: ${parsed.ip}`,
-        `Method: ${parsed.method}`,
-        `URI: ${fullUri}`,
-        `Status: ${parsed.status}`,
-        `Size: ${parsed.size}`,
-        parsed.referer && parsed.referer !== "-" ? `Referer: ${parsed.referer}` : "",
-        parsed.userAgent && parsed.userAgent !== "-" ? `UserAgent: ${parsed.userAgent}` : "",
-        // Also include the raw line for pattern matching
-        line
-      ].filter(Boolean).join(" ");
-
-      events.push({
-        lineIndex: i,
-        timestamp: parsed.timestamp,
-        content: contentLine,
-        raw: line,
-        fields: {
-          ip: parsed.ip,
-          method: parsed.method,
-          uri: fullUri,
-          status: parsed.status,
-          size: parsed.size,
-          referer: parsed.referer || "-",
-          userAgent: parsed.userAgent || "-",
-          format: parsed.format,
-          ...(parsed.serverIp ? { serverIp: parsed.serverIp } : {}),
-          ...(parsed.port ? { port: parsed.port } : {}),
-          ...(parsed.user && parsed.user !== "-" ? { user: parsed.user } : {})
-        }
-      });
-    }
-  }
-
-  return events;
-}
-
-// ─── LOG PARSER ENGINE ───────────────────────────────────────────────────────
-function detectLogType(content) {
-  const lower = content.toLowerCase();
-  const checks = {
-    windows_event_log: [
-      /event\s*id[:\s=]/i, /4624|4625|4688|7045|4697|1102|4698/,
-      /logon\s*type/i, /security.*audit/i, /microsoft-windows/i,
-      /source\s*name.*microsoft/i, /event\s*record\s*id/i
-    ],
-    web_server_log: [
-      /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}.*(?:GET|POST|PUT|DELETE|HEAD|OPTIONS)/i,
-      /HTTP\/[12]\.[01]/i, /\[.*\]\s*"(?:GET|POST)/i,
-      /(?:IIS|Apache|nginx)/i, /(?:200|301|302|400|403|404|500)\s+\d+/
-    ],
-    registry: [
-      /HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER/i,
-      /CurrentVersion\\Run/i, /CurrentControlSet\\Services/i,
-      /REG_(?:SZ|DWORD|BINARY|EXPAND_SZ|MULTI_SZ)/i,
-      /\[HKEY_/i
-    ]
-  };
-  let bestMatch = null;
-  let bestScore = 0;
-  for (const [type, patterns] of Object.entries(checks)) {
-    const score = patterns.filter(p => p.test(content)).length;
-    if (score > bestScore) { bestScore = score; bestMatch = type; }
-  }
-  return bestScore >= 1 ? bestMatch : guessFromKeywords(lower);
-}
-
-function guessFromKeywords(lower) {
-  if (lower.includes("event") && (lower.includes("logon") || lower.includes("audit"))) return "windows_event_log";
-  if (lower.includes("get ") || lower.includes("post ") || lower.includes("http/")) return "web_server_log";
-  if (lower.includes("hklm") || lower.includes("hkcu") || lower.includes("reg_")) return "registry";
-  return null;
-}
-
-function runDetection(content, logType, customRules, artifactEvents) {
-  const rules = (customRules && customRules[logType]) || [];
-  const findings = [];
-  // Split content into lines for line-level evidence
-  const lines = content.split("\n");
-
-  for (const rule of rules) {
-    let matchCount = 0;
-    let matchExcerpts = [];
-    let matchedEvents = []; // NEW: capture matched event lines with context
-
-    // Line-level matching for evidence capture
-    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-      const line = lines[lineIdx];
-      if (!line.trim()) continue;
-
-      // Provider-based filtering: skip lines from excluded providers
-      if (rule.providerExclude && rule.providerExclude.test(line)) continue;
-      // If providerFilter is set, only match lines containing that provider context
-      if (rule.providerFilter && !rule.providerFilter.test(line)) continue;
-
-      let lineMatched = false;
-
-      // Test main pattern
-      const mainRe = new RegExp(rule.pattern.source, rule.pattern.flags);
-      const mainMatch = line.match(mainRe);
-      if (mainMatch) {
-        matchCount += mainMatch.length;
-        matchExcerpts.push(...mainMatch.slice(0, 2));
-        lineMatched = true;
-      }
-
-      // Test alt patterns
-      if (rule.altPatterns) {
-        for (const alt of rule.altPatterns) {
-          const altRe = new RegExp(alt.source, alt.flags);
-          const am = line.match(altRe);
-          if (am) {
-            matchCount += am.length;
-            matchExcerpts.push(...am.slice(0, 1));
-            lineMatched = true;
-          }
-        }
-      }
-
-      if (lineMatched) {
-        // Extract event context from the line
-        const evIdMatch = line.match(/EventID[:\s]*(\d+)/i);
-        const recIdMatch = line.match(/EventRecordID[:\s]*(\d+)/i);
-        const tsMatch = line.match(/Timestamp[:\s]*([\d\-T:.Z]+)/i);
-        const providerMatch = line.match(/Provider[:\s]*([^\s]+(?:\s[^\s]+)*?)(?:\s+(?:Channel|Timestamp|EventID|EventRecordID))/i);
-
-        matchedEvents.push({
-          lineIndex: lineIdx,
-          eventId: evIdMatch ? evIdMatch[1] : null,
-          recordId: recIdMatch ? recIdMatch[1] : null,
-          timestamp: tsMatch ? tsMatch[1] : null,
-          provider: providerMatch ? providerMatch[1] : null,
-          content: line.length > 500 ? line.slice(0, 500) + "…" : line,
-          highlights: [...new Set([...(mainRe.exec(line) || []), ...matchExcerpts.slice(-2)])].filter(Boolean)
-        });
-      }
-    }
-
-    // Keyword scan
-    let keywordHits = 0;
-    if (rule.keywords) {
-      for (const kw of rule.keywords) {
-        if (content.toLowerCase().includes(kw.toLowerCase())) keywordHits++;
-      }
-    }
-    // Threshold logic for error-rate rules
-    if (rule.countThreshold && matchCount < rule.countThreshold) continue;
-
-    if (matchCount > 0) {
-      // Keywords boost confidence but cannot trigger a finding alone
-      const confidence = calculateConfidence(matchCount, keywordHits, rule);
-
-      // Deduplicate matched events by recordId if available
-      const seenRecords = new Set();
-      const uniqueEvents = matchedEvents.filter(e => {
-        if (e.recordId) {
-          if (seenRecords.has(e.recordId)) return false;
-          seenRecords.add(e.recordId);
-        }
-        return true;
-      });
-
-      // Also try to enrich from artifactEvents (backend-parsed structured events)
-      let enrichedEvents = uniqueEvents;
-      if (artifactEvents && artifactEvents.length > 0) {
-        enrichedEvents = uniqueEvents.map(me => {
-          // Try to match with structured backend event by record_id or by content overlap
-          if (me.recordId) {
-            const structured = artifactEvents.find(ae => String(ae.record_id) === String(me.recordId));
-            if (structured) {
-              return { ...me, ...structured, content: me.content, structuredFields: structured.fields || {} };
-            }
-          }
-          return me;
-        });
-      }
-
-      findings.push({
-        ...rule,
-        matchCount,
-        keywordHits,
-        confidence,
-        excerpts: [...new Set(matchExcerpts)].slice(0, 5),
-        matchedEvents: enrichedEvents.sort((a, b) => {
-          const ta = a.timestamp || ""; const tb = b.timestamp || "";
-          return ta.localeCompare(tb);
-        })
-      });
-    }
-  }
-  return findings.sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity));
-}
-
-function calculateConfidence(matchCount, keywordHits, rule) {
-  let score = 0;
-  if (matchCount >= 5) score += 40;
-  else if (matchCount >= 2) score += 30;
-  else if (matchCount >= 1) score += 20;
-  if (keywordHits >= 3) score += 30;
-  else if (keywordHits >= 2) score += 20;
-  else if (keywordHits >= 1) score += 10;
-  if (rule.severity === "critical") score += 20;
-  else if (rule.severity === "high") score += 15;
-  else score += 10;
-  score += Math.min(matchCount * 2, 20);
-  return Math.min(score, 100);
-}
 
 function severityWeight(s) {
   return { critical: 4, high: 3, medium: 2, low: 1, info: 0 }[s] || 0;
@@ -2083,21 +1273,7 @@ export default function SigilDFIR() {
   const [activeTab, setActiveTab] = useState("analyze");
   const [severityFilter, setSeverityFilter] = useState("all");
   const [ruleExpanded, setRuleExpanded] = useState(null);
-  const [customRules, setCustomRules] = useState(() => {
-    // Deep clone DETECTION_RULES preserving RegExp objects
-    const clone = {};
-    for (const [key, rules] of Object.entries(DETECTION_RULES)) {
-      clone[key] = rules.map(r => ({
-        ...r,
-        pattern: new RegExp(r.pattern.source, r.pattern.flags),
-        altPatterns: r.altPatterns ? r.altPatterns.map(p => new RegExp(p.source, p.flags)) : [],
-        keywords: [...(r.keywords || [])],
-        mitre: [...(r.mitre || [])],
-        nextSteps: [...(r.nextSteps || [])]
-      }));
-    }
-    return clone;
-  });
+  const [customRules, setCustomRules] = useState({ windows_event_log: [], web_server_log: [], registry: [] });
   const [editingRule, setEditingRule] = useState(null);
   const [showRuleEditor, setShowRuleEditor] = useState(false);
   const [parsingEvtx, setParsingEvtx] = useState(0);
@@ -2117,54 +1293,42 @@ export default function SigilDFIR() {
   const fileInputRef = useRef(null);
 
   // Parse EVTX via backend API
-  const parseEvtxViaBackend = useCallback(async (file) => {
+  // ── File Upload via Backend /parse ─────────────────────────────────
+  const parseViaBackend = useCallback(async (file) => {
     setParsingEvtx(prev => prev + 1);
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(`${backendUrl}/upload-evtx/`, { method: "POST", body: formData });
+      const res = await fetch(`${backendUrl}/parse`, { method: "POST", body: formData });
       const data = await res.json();
       if (data.status === "success" && data.events) {
-        // Reconstruct text content from parsed events for rule matching
-        const content = data.events.map(e => {
-          const parts = [
-            `EventID: ${e.event_id || ""}`,
-            e.provider ? `Provider: ${e.provider}` : "",
-            e.channel ? `Channel: ${e.channel}` : "",
-            e.timestamp ? `Timestamp: ${e.timestamp}` : "",
-            e.record_id ? `EventRecordID: ${e.record_id}` : "",
-            e.message || "",
-            // Flatten fields for keyword matching
-            ...(e.fields ? Object.entries(e.fields).map(([k, v]) => `${k}: ${v}`) : [])
-          ];
-          return parts.filter(Boolean).join(" ");
-        }).join("\n");
         setArtifacts(prev => [...prev, {
           name: file.name,
           size: file.size,
           file,
-          content,
-          logType: "windows_event_log",
+          content: data.events.map(e => e.content || e.message || "").join("\n"),
+          logType: data.log_type || "unknown",
           timestamp: Date.now(),
           parsedBackend: true,
           eventCount: data.event_count,
-          events: data.events
+          events: data.events,
+          webLogFormat: data.format || "Unknown"
         }]);
         setBackendStatus("ok");
       } else {
         throw new Error(data.message || "Backend returned error");
       }
     } catch (err) {
-      console.error("Backend EVTX parse failed, falling back to text read:", err);
+      console.error("Backend parse failed:", err);
       setBackendStatus("error");
-      // Fallback: read as text
+      // Minimal fallback: store raw file for later /analyze call
       const reader = new FileReader();
       reader.onload = (e) => {
         const content = e.target.result;
         setArtifacts(prev => [...prev, {
           name: file.name, size: file.size, file, content,
-          logType: "windows_event_log", timestamp: Date.now(),
-          parsedBackend: false, fallback: true
+          logType: "unknown", timestamp: Date.now(),
+          parsedBackend: false
         }]);
       };
       reader.readAsText(file);
@@ -2174,51 +1338,8 @@ export default function SigilDFIR() {
   }, [backendUrl]);
 
   const handleFileRead = useCallback((file) => {
-    const fn = file.name.toLowerCase();
-    // Route .evtx files to backend parser
-    if (fn.endsWith(".evtx") || fn.endsWith(".evt")) {
-      parseEvtxViaBackend(file);
-      return;
-    }
-    // Text-based parsing for all other file types
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target.result;
-      let logType = detectLogType(content);
-      if (!logType || logType === null) {
-        if (fn.endsWith(".reg")) logType = "registry";
-        else if (/(?:access|error|iis|apache|nginx|httpd)/.test(fn)) logType = "web_server_log";
-      }
-
-      // Parse web access logs into structured events
-      if (logType === "web_server_log") {
-        const parsedEvents = parseWebAccessLogs(content);
-        if (parsedEvents.length > 0) {
-          // Rebuild content with structured fields for better detection matching
-          const structuredContent = parsedEvents.map(ev => ev.content).join("\n");
-          setArtifacts(prev => [...prev, {
-            name: file.name, size: file.size, file,
-            content: structuredContent,
-            logType, timestamp: Date.now(),
-            parsedBackend: true,
-            eventCount: parsedEvents.length,
-            events: parsedEvents.map(ev => ({
-              timestamp: ev.timestamp,
-              event_id: ev.fields?.status || null,
-              record_id: String(ev.lineIndex + 1),
-              message: ev.raw,
-              fields: ev.fields
-            })),
-            webLogFormat: parsedEvents[0]?.fields?.format || "Unknown"
-          }]);
-          return;
-        }
-      }
-
-      setArtifacts(prev => [...prev, { name: file.name, size: file.size, file, content, logType, timestamp: Date.now() }]);
-    };
-    reader.readAsText(file);
-  }, [parseEvtxViaBackend]);
+    parseViaBackend(file);
+  }, [parseViaBackend]);
 
   const handleFiles = useCallback((files) => {
     Array.from(files).forEach(handleFileRead);
@@ -2246,11 +1367,13 @@ export default function SigilDFIR() {
 
   const handlePasteSubmit = useCallback(() => {
     if (!pasteContent.trim()) return;
-    const logType = detectLogType(pasteContent);
-    setArtifacts(prev => [...prev, { name: `pasted_log_${Date.now()}.txt`, size: pasteContent.length, content: pasteContent, logType, timestamp: Date.now() }]);
+    // Create a Blob/File from pasted content and send to backend
+    const blob = new Blob([pasteContent], { type: "text/plain" });
+    const file = new File([blob], `pasted_log_${Date.now()}.txt`, { type: "text/plain" });
+    parseViaBackend(file);
     setPasteContent("");
     setShowPaste(false);
-  }, [pasteContent]);
+  }, [pasteContent, parseViaBackend]);
 
   const removeArtifact = useCallback((idx) => {
     setArtifacts(prev => prev.filter((_, i) => i !== idx));
@@ -2266,75 +1389,56 @@ export default function SigilDFIR() {
 
     const iocPayload = iocEnabled && iocList.length > 0 ? JSON.stringify(iocList) : null;
     let allFindings = [];
-    let useBackend = false;
 
-    // Try backend-first for each artifact
     try {
-      const backendResults = await Promise.all(
-        artifacts.filter(a => a.logType).map(async (artifact) => {
+      const results = await Promise.all(
+        artifacts.filter(a => a.logType && a.logType !== "unknown").map(async (artifact) => {
           try {
-            // If artifact has raw file blob, send it to /analyze
-            if (artifact.file) {
-              const formData = new FormData();
-              formData.append("file", artifact.file);
-              if (iocPayload) formData.append("ioc_list", iocPayload);
-              formData.append("ioc_enabled", String(iocEnabled));
-              const res = await fetch(`${backendUrl}/analyze`, { method: "POST", body: formData });
-              const data = await res.json();
-              if (data.status === "success" && data.findings) {
-                useBackend = true;
-                // Map backend findings to frontend format
-                return data.findings.map(f => ({
-                  ...f,
-                  matchCount: f.match_count,
-                  keywordHits: f.keyword_hits,
-                  matchedEvents: (f.matched_events || []).map(e => ({
-                    ...e,
-                    eventId: e.event_id,
-                    recordId: e.record_id,
-                    structuredFields: e.fields
-                  })),
-                  nextSteps: f.next_steps,
-                  isIocRule: f.is_ioc_rule,
-                  source: artifact.name,
-                  logType: artifact.logType
-                }));
-              }
+            if (!artifact.file) return null;
+            const formData = new FormData();
+            formData.append("file", artifact.file);
+            if (iocPayload) formData.append("ioc_list", iocPayload);
+            formData.append("ioc_enabled", String(iocEnabled));
+            const res = await fetch(`${backendUrl}/analyze`, { method: "POST", body: formData });
+            const data = await res.json();
+            if (data.status === "success" && data.findings) {
+              return data.findings.map(f => ({
+                id: f.id,
+                name: f.name,
+                description: f.description,
+                severity: f.severity,
+                mitre: f.mitre || [],
+                matchCount: f.match_count,
+                keywordHits: f.keyword_hits,
+                confidence: f.confidence,
+                excerpts: f.excerpts || [],
+                matchedEvents: (f.matched_events || []).map(e => ({
+                  timestamp: e.timestamp,
+                  eventId: e.event_id,
+                  recordId: e.record_id,
+                  content: e.content,
+                  message: e.message,
+                  structuredFields: e.fields,
+                  line_index: e.line_index
+                })),
+                nextSteps: f.next_steps || [],
+                isIocRule: f.is_ioc_rule || false,
+                source: artifact.name,
+                logType: artifact.logType
+              }));
             }
           } catch (err) {
             console.warn("Backend analyze failed for", artifact.name, err);
           }
-          return null; // Will fall back to client-side
+          return null;
         })
       );
 
-      // Collect backend results
-      for (const result of backendResults) {
+      for (const result of results) {
         if (result) allFindings.push(...result);
       }
     } catch (err) {
-      console.warn("Backend analysis failed, falling back to client-side:", err);
-    }
-
-    // Fallback: client-side detection for artifacts that didn't get backend results
-    const backendProcessed = new Set(allFindings.map(f => f.source));
-    const unprocessed = artifacts.filter(a => a.logType && !backendProcessed.has(a.name));
-
-    if (unprocessed.length > 0) {
-      let effectiveRules = { ...customRules };
-      if (iocEnabled && iocList.length > 0) {
-        const iocRules = buildIocRule();
-        if (iocRules) {
-          for (const logType of Object.keys(effectiveRules)) {
-            effectiveRules[logType] = [...(effectiveRules[logType] || []), ...iocRules];
-          }
-        }
-      }
-      for (const artifact of unprocessed) {
-        const af = runDetection(artifact.content, artifact.logType, effectiveRules, artifact.events || null);
-        af.forEach(f => { f.source = artifact.name; f.logType = artifact.logType; });
-        allFindings.push(...af);
-      }
+      console.error("Analysis failed:", err);
     }
 
     // Deduplicate by rule ID, merge matchedEvents
@@ -2355,7 +1459,7 @@ export default function SigilDFIR() {
     setOverallScore(computeOverallScore(final));
     setScanning(false);
     if (final.length > 0) setExpandedFindings(new Set([final[0].id]));
-  }, [artifacts, customRules, iocEnabled, iocList, backendUrl]);
+  }, [artifacts, iocEnabled, iocList, backendUrl]);
 
   const toggleFinding = (id) => {
     setExpandedFindings(prev => {
@@ -2512,57 +1616,106 @@ export default function SigilDFIR() {
     setShowRuleEditor(true);
   };
 
-  const saveRule = () => {
+  // ── Backend Rule Sync ───────────────────────────────────────────────
+  const loadRulesFromBackend = useCallback(async () => {
+    try {
+      const res = await fetch(`${backendUrl}/rules?grouped=true`);
+      const data = await res.json();
+      if (data.status === "success" && data.rules) {
+        const hydrated = {};
+        for (const [logType, rules] of Object.entries(data.rules)) {
+          hydrated[logType] = rules.map(r => {
+            let mainPattern;
+            try { mainPattern = new RegExp(r.pattern || ".", "gi"); } catch { mainPattern = /./gi; }
+            const altPatterns = (r.alt_patterns || []).map(p => {
+              try { return new RegExp(p, "gi"); } catch { return /./gi; }
+            });
+            return {
+              id: r.id,
+              name: r.name,
+              description: r.description || "",
+              severity: r.severity || "medium",
+              logType: logType,
+              mitre: r.mitre || [],
+              pattern: mainPattern,
+              altPatterns: altPatterns,
+              keywords: r.keywords || [],
+              nextSteps: r.next_steps || [],
+              providerFilter: r.provider_filter ? (() => { try { return new RegExp(r.provider_filter, "i"); } catch { return null; } })() : null,
+              providerExclude: r.provider_exclude ? (() => { try { return new RegExp(r.provider_exclude, "i"); } catch { return null; } })() : null,
+              countThreshold: r.count_threshold || null,
+              sigmaSource: r.sigma_source || null,
+              isBuiltin: r.is_builtin || false,
+              isEnabled: r.is_enabled !== false,
+            };
+          });
+        }
+        setCustomRules(hydrated);
+        return true;
+      }
+    } catch (err) {
+      console.warn("Failed to load rules from backend:", err);
+    }
+    return false;
+  }, [backendUrl]);
+
+  // Load rules from backend on mount
+  useEffect(() => { loadRulesFromBackend(); }, [loadRulesFromBackend]);
+
+  const saveRule = async () => {
     if (!editingRule) return;
     const { form, isNew, originalLogType, originalId } = editingRule;
     const newRule = formToRule(form);
     const logType = form.logType;
+    try {
+      const rulePayload = {
+        id: form.id, name: form.name.trim(), description: form.description?.trim() || "",
+        severity: form.severity, log_type: logType,
+        mitre: form.mitre.filter(s => s.trim()), pattern: form.pattern,
+        alt_patterns: form.altPatterns.split("\n").filter(s => s.trim()),
+        keywords: form.keywords.filter(s => s.trim()),
+        next_steps: form.nextSteps.filter(s => s.trim()),
+      };
+      if (isNew) {
+        const res = await fetch(`${backendUrl}/rules`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(rulePayload)
+        });
+        if ((await res.json()).status === "success") { await loadRulesFromBackend(); setShowRuleEditor(false); setEditingRule(null); return; }
+      } else {
+        const res = await fetch(`${backendUrl}/rules/${originalId || form.id}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(rulePayload)
+        });
+        if ((await res.json()).status === "success") { await loadRulesFromBackend(); setShowRuleEditor(false); setEditingRule(null); return; }
+      }
+    } catch (err) { console.warn("Backend rule save failed, saving locally:", err); }
+    // Fallback local
     setCustomRules(prev => {
       const next = { ...prev };
-      // Remove from original location if editing and type changed
-      if (!isNew && originalId) {
-        next[originalLogType] = (next[originalLogType] || []).filter(r => r.id !== originalId);
-      }
+      if (!isNew && originalId) next[originalLogType] = (next[originalLogType] || []).filter(r => r.id !== originalId);
       if (!next[logType]) next[logType] = [];
-      if (isNew) {
-        next[logType] = [...next[logType], newRule];
-      } else {
-        const idx = next[logType].findIndex(r => r.id === newRule.id);
-        if (idx >= 0) {
-          next[logType] = [...next[logType]];
-          next[logType][idx] = newRule;
-        } else {
-          next[logType] = [...next[logType], newRule];
-        }
-      }
+      if (isNew) next[logType] = [...next[logType], newRule];
+      else { const idx = next[logType].findIndex(r => r.id === newRule.id); if (idx >= 0) { next[logType] = [...next[logType]]; next[logType][idx] = newRule; } else next[logType] = [...next[logType], newRule]; }
       return next;
     });
-    setShowRuleEditor(false);
-    setEditingRule(null);
+    setShowRuleEditor(false); setEditingRule(null);
   };
 
-  const deleteRule = (rule) => {
+  const deleteRule = async (rule) => {
     if (!confirm(`Delete rule "${rule.name}" (${rule.id})?`)) return;
-    setCustomRules(prev => {
-      const next = { ...prev };
-      next[rule.logType] = (next[rule.logType] || []).filter(r => r.id !== rule.id);
-      return next;
-    });
+    try { await fetch(`${backendUrl}/rules/${rule.id}`, { method: "DELETE" }); await loadRulesFromBackend(); }
+    catch (err) { console.warn("Backend delete failed:", err); setCustomRules(prev => { const next = { ...prev }; next[rule.logType] = (next[rule.logType] || []).filter(r => r.id !== rule.id); return next; }); }
     setRuleExpanded(null);
   };
 
-  const resetRules = () => {
+  const resetRules = async () => {
     if (!confirm("Reset all rules to defaults? Custom rules will be lost.")) return;
+    try { await fetch(`${backendUrl}/rules/reset`, { method: "POST" }); await loadRulesFromBackend(); return; }
+    catch (err) { console.warn("Backend reset failed:", err); }
     const clone = {};
     for (const [key, rules] of Object.entries(DETECTION_RULES)) {
-      clone[key] = rules.map(r => ({
-        ...r,
-        pattern: new RegExp(r.pattern.source, r.pattern.flags),
-        altPatterns: r.altPatterns ? r.altPatterns.map(p => new RegExp(p.source, p.flags)) : [],
-        keywords: [...(r.keywords || [])],
-        mitre: [...(r.mitre || [])],
-        nextSteps: [...(r.nextSteps || [])]
-      }));
+      clone[key] = rules.map(r => ({ ...r, pattern: new RegExp(r.pattern.source, r.pattern.flags), altPatterns: r.altPatterns ? r.altPatterns.map(p => new RegExp(p.source, p.flags)) : [], keywords: [...(r.keywords || [])], mitre: [...(r.mitre || [])], nextSteps: [...(r.nextSteps || [])] }));
     }
     setCustomRules(clone);
   };
@@ -2570,253 +1723,69 @@ export default function SigilDFIR() {
   const exportRules = () => {
     const exportData = {};
     for (const [key, rules] of Object.entries(customRules)) {
-      exportData[key] = rules.map(r => ({
-        ...r,
-        pattern: { source: r.pattern.source, flags: r.pattern.flags },
-        altPatterns: (r.altPatterns || []).map(p => ({ source: p.source, flags: p.flags }))
-      }));
+      exportData[key] = rules.map(r => ({ ...r, pattern: r.pattern instanceof RegExp ? { source: r.pattern.source, flags: r.pattern.flags } : r.pattern, altPatterns: (r.altPatterns || []).map(p => p instanceof RegExp ? { source: p.source, flags: p.flags } : p) }));
     }
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url;
-    a.download = `sigil_rules_${new Date().toISOString().slice(0,10)}.json`;
-    a.click(); URL.revokeObjectURL(url);
+    const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url;
+    a.download = `sigil_rules_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(url);
   };
 
   const importRulesFromFile = (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const file = e.target.files?.[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        const data = JSON.parse(ev.target.result);
-        const imported = {};
+        const data = JSON.parse(ev.target.result); const imported = {};
         for (const [key, rules] of Object.entries(data)) {
           if (!Array.isArray(rules)) continue;
-          imported[key] = rules.map(r => ({
-            ...r,
-            pattern: new RegExp(r.pattern?.source || r.pattern || ".", r.pattern?.flags || "gi"),
-            altPatterns: (r.altPatterns || []).map(p => new RegExp(p?.source || p || ".", p?.flags || "gi")),
-            keywords: r.keywords || [],
-            mitre: r.mitre || [],
-            nextSteps: r.nextSteps || []
-          }));
+          imported[key] = rules.map(r => ({ ...r, pattern: new RegExp(r.pattern?.source || r.pattern || ".", r.pattern?.flags || "gi"), altPatterns: (r.altPatterns || []).map(p => new RegExp(p?.source || p || ".", p?.flags || "gi")), keywords: r.keywords || [], mitre: r.mitre || [], nextSteps: r.nextSteps || [] }));
         }
-        setCustomRules(imported);
-        alert(`Imported ${Object.values(imported).flat().length} rules successfully.`);
-      } catch (err) {
-        alert("Failed to import rules: " + err.message);
-      }
+        setCustomRules(imported); alert(`Imported ${Object.values(imported).flat().length} rules successfully.`);
+      } catch (err) { alert("Failed to import rules: " + err.message); }
     };
-    reader.readAsText(file);
+    reader.readAsText(file); e.target.value = "";
+  };
+
+  const importSigmaRules = async (e) => {
+    const files = Array.from(e.target.files || []); if (files.length === 0) return;
+    try {
+      let totalImported = 0, totalErrors = 0, totalDuplicates = 0;
+      for (const file of files) {
+        const formData = new FormData(); formData.append("file", file);
+        const res = await fetch(`${backendUrl}/rules/import-sigma`, { method: "POST", body: formData });
+        const data = await res.json();
+        if (data.status === "success") {
+          totalImported += data.imported;
+          totalDuplicates += (data.duplicates || 0);
+        } else totalErrors++;
+      }
+      await loadRulesFromBackend();
+      const parts = [`Imported ${totalImported} Sigma rule${totalImported !== 1 ? "s" : ""}`];
+      if (totalDuplicates > 0) parts.push(`${totalDuplicates} duplicate${totalDuplicates !== 1 ? "s" : ""} skipped`);
+      if (totalErrors > 0) parts.push(`${totalErrors} failed`);
+      alert(parts.join(", ") + ".");
+    } catch (err) {
+      alert("Sigma import failed: backend is unreachable. Please check the backend connection.");
+      console.error("Sigma import failed:", err);
+    }
     e.target.value = "";
   };
 
-  // ── Sigma YAML Importer ────────────────────────────────────────────────
-  const parseMiniYaml = (text) => {
-    const result = {};
-    const lines = text.split("\n");
-    const stack = [{ obj: result, indent: -1, key: null }];
-    let lastKey = null;
-    let lastIndent = -1;
-
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      if (raw.trim() === "" || raw.trim().startsWith("#")) continue;
-      const indent = raw.search(/\S/);
-      const trimmed = raw.trim();
-
-      while (stack.length > 1 && indent <= stack[stack.length - 1].indent) stack.pop();
-      const parent = stack[stack.length - 1].obj;
-
-      if (trimmed.startsWith("- ")) {
-        const val = trimmed.slice(2).trim().replace(/^['"]|['"]$/g, "");
-        if (lastKey && parent[lastKey] !== undefined) {
-          if (!Array.isArray(parent[lastKey])) parent[lastKey] = parent[lastKey] ? [parent[lastKey]] : [];
-          parent[lastKey].push(val);
-        }
-      } else if (trimmed.includes(":")) {
-        const colonIdx = trimmed.indexOf(":");
-        const key = trimmed.slice(0, colonIdx).trim();
-        let value = trimmed.slice(colonIdx + 1).trim().replace(/^['"]|['"]$/g, "");
-        const cleanKey = key.split("|")[0];
-        lastKey = cleanKey;
-        lastIndent = indent;
-
-        if (value === "" || value === "|" || value === ">") {
-          parent[cleanKey] = {};
-          stack.push({ obj: parent[cleanKey], indent, key: cleanKey });
-        } else {
-          parent[cleanKey] = value;
-        }
-      }
-    }
-    return result;
-  };
-
-  const sigmaLevelToSeverity = (level) => {
-    return ({ critical: "critical", high: "high", medium: "medium", low: "low", informational: "low" })[(level || "medium").toLowerCase()] || "medium";
-  };
-
-  const sigmaLogsourceToType = (logsource) => {
-    if (!logsource) return "windows_event_log";
-    const p = (logsource.product || "").toLowerCase();
-    const c = (logsource.category || "").toLowerCase();
-    const s = (logsource.service || "").toLowerCase();
-    if (p === "windows" || s.includes("security") || s.includes("system") || s.includes("powershell") || s.includes("sysmon")) return "windows_event_log";
-    if ((p === "linux" || p === "") && (s.includes("apache") || s.includes("nginx") || s.includes("iis"))) return "web_server_log";
-    if (c.includes("webserver") || c.includes("proxy") || c === "web") return "web_server_log";
-    if (c.includes("registry") || s.includes("registry")) return "registry";
-    return "windows_event_log";
-  };
-
-  const sigmaDetectionToPatterns = (detection) => {
-    if (!detection) return { pattern: /./gi, altPatterns: [], keywords: [] };
-    const patterns = [];
-    const keywords = [];
-
-    for (const [key, value] of Object.entries(detection)) {
-      if (key === "condition" || key === "timeframe") continue;
-
-      if (typeof value === "string") {
-        keywords.push(value);
-      } else if (Array.isArray(value)) {
-        for (const item of value) {
-          if (typeof item === "string" && item.trim()) {
-            keywords.push(item.trim());
-            const escaped = item.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*");
-            try { patterns.push(new RegExp(escaped, "gi")); } catch {}
-          }
-        }
-      } else if (typeof value === "object" && value !== null) {
-        for (const [field, fieldVal] of Object.entries(value)) {
-          const cleanField = field.split("|")[0];
-          const modifier = field.includes("|") ? field.split("|").slice(1).join("|") : "";
-          const values = Array.isArray(fieldVal) ? fieldVal : [fieldVal];
-
-          for (const v of values) {
-            if (v === null || v === undefined) continue;
-            const strVal = String(v).trim();
-            if (!strVal) continue;
-            keywords.push(strVal);
-
-            const escapedVal = strVal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*");
-            let regexStr;
-
-            if (cleanField.toLowerCase() === "eventid") {
-              regexStr = `EventID[:\\s]*${escapedVal}\\b`;
-            } else if (modifier.includes("contains")) {
-              regexStr = escapedVal;
-            } else if (modifier.includes("re")) {
-              regexStr = strVal;
-            } else {
-              regexStr = `(?:${cleanField}[:\\s="]*${escapedVal}|${escapedVal})`;
-            }
-            try { patterns.push(new RegExp(regexStr, "gi")); } catch {}
-          }
-        }
-      }
-    }
-    const primary = patterns.length > 0 ? patterns[0] : /./gi;
-    return { pattern: primary, altPatterns: patterns.slice(1), keywords: [...new Set(keywords)].slice(0, 20) };
-  };
-
-  const importSigmaRules = (e) => {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    let importCount = 0;
-    let errorCount = 0;
-    const newRules = {};
-    for (const [k, v] of Object.entries(customRules)) newRules[k] = [...v];
-
-    const processFile = (file) => new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        try {
-          const text = ev.target.result;
-          const docs = text.split(/^---$/m).filter(d => d.trim());
-          for (const doc of docs) {
-            const sigma = parseMiniYaml(doc);
-            if (!sigma.title && !sigma.detection) { errorCount++; continue; }
-            const logType = sigmaLogsourceToType(sigma.logsource);
-            const severity = sigmaLevelToSeverity(sigma.level);
-            const { pattern, altPatterns, keywords } = sigmaDetectionToPatterns(sigma.detection);
-
-            const mitre = [];
-            const tags = sigma.tags;
-            if (tags) {
-              const tagList = Array.isArray(tags) ? tags : typeof tags === "string" ? tags.split(/[\s,]+/) : Object.values(tags);
-              for (const tag of tagList) {
-                const m = String(tag).match(/attack\.t(\d{4}(?:\.\d{3})?)/i);
-                if (m) mitre.push("T" + m[1].toUpperCase());
-              }
-            }
-
-            if (!newRules[logType]) newRules[logType] = [];
-            const prefix = { windows_event_log: "SIG", web_server_log: "SGW", registry: "SGR" }[logType] || "SIG";
-            const nums = newRules[logType].map(r => { const m2 = r.id.match(/(\d+)$/); return m2 ? parseInt(m2[1]) : 0; });
-            const nextNum = (Math.max(0, ...nums) + 1).toString().padStart(3, "0");
-
-            newRules[logType].push({
-              id: `${prefix}-${nextNum}`,
-              name: sigma.title || "Imported Sigma Rule",
-              description: String(sigma.description || "").slice(0, 500),
-              severity,
-              mitre: [...new Set(mitre)],
-              pattern,
-              altPatterns,
-              keywords,
-              nextSteps: [
-                sigma.falsepositives ? `False positives: ${Array.isArray(sigma.falsepositives) ? sigma.falsepositives.join(", ") : sigma.falsepositives}` : "Review matched events for context",
-                "Correlate with other findings in the timeline",
-                sigma.references ? `Reference: ${Array.isArray(sigma.references) ? sigma.references[0] : sigma.references}` : "Check SigmaHQ for rule updates"
-              ].filter(Boolean),
-              sigmaSource: { id: sigma.id || null, author: sigma.author || null, status: sigma.status || null, level: sigma.level || null, filename: file.name }
-            });
-            importCount++;
-          }
-        } catch (err) { errorCount++; console.error("Sigma import error:", file.name, err); }
-        resolve();
-      };
-      reader.readAsText(file);
-    });
-
-    Promise.all(files.map(processFile)).then(() => {
-      setCustomRules(newRules);
-      alert(`Imported ${importCount} Sigma rule${importCount !== 1 ? "s" : ""}${errorCount > 0 ? ` (${errorCount} failed)` : ""}.`);
-    });
-    e.target.value = "";
-  };
 
   // ── Case Management ─────────────────────────────────────────────────
   const serializeCase = () => {
-    const serializeRules = (rules) => {
-      const out = {};
-      for (const [key, ruleList] of Object.entries(rules)) {
-        out[key] = ruleList.map(r => ({
-          ...r,
-          pattern: { source: r.pattern.source, flags: r.pattern.flags },
-          altPatterns: (r.altPatterns || []).map(p => ({ source: p.source, flags: p.flags })),
-          providerFilter: r.providerFilter ? { source: r.providerFilter.source, flags: r.providerFilter.flags } : null,
-          providerExclude: r.providerExclude ? { source: r.providerExclude.source, flags: r.providerExclude.flags } : null,
-        }));
-      }
-      return out;
-    };
     // Strip raw content from artifacts for file size — keep parsed events and metadata
     const lightArtifacts = artifacts.map(a => ({
       name: a.name, size: a.size, logType: a.logType, timestamp: a.timestamp,
-      parsedBackend: a.parsedBackend, eventCount: a.eventCount, fallback: a.fallback,
+      parsedBackend: a.parsedBackend, eventCount: a.eventCount,
       content: a.content,
       events: a.events || null
     }));
-    // Strip regex from findings matchedEvents for serialization
+    // Strip regex from findings for serialization
     const lightFindings = findings.map(f => ({
       ...f,
-      pattern: f.pattern instanceof RegExp ? { source: f.pattern.source, flags: f.pattern.flags } : f.pattern,
-      altPatterns: (f.altPatterns || []).map(p => p instanceof RegExp ? { source: p.source, flags: p.flags } : p),
-      providerFilter: f.providerFilter instanceof RegExp ? { source: f.providerFilter.source, flags: f.providerFilter.flags } : null,
-      providerExclude: f.providerExclude instanceof RegExp ? { source: f.providerExclude.source, flags: f.providerExclude.flags } : null,
+      pattern: f.pattern instanceof RegExp ? f.pattern.source : f.pattern,
+      altPatterns: (f.altPatterns || []).map(p => p instanceof RegExp ? p.source : p),
     }));
     return {
       sigil_version: "1.0.0",
@@ -2824,7 +1793,6 @@ export default function SigilDFIR() {
       artifacts: lightArtifacts,
       findings: lightFindings,
       overallScore,
-      customRules: serializeRules(customRules),
       iocList: iocList,
       iocEnabled: iocEnabled
     };
@@ -2850,42 +1818,13 @@ export default function SigilDFIR() {
       try {
         const data = JSON.parse(ev.target.result);
         if (!data.sigil_version) throw new Error("Not a valid SIGIL case file");
-        // Restore case meta
         if (data.case) setCaseMeta(data.case);
-        // Restore artifacts
         if (data.artifacts) setArtifacts(data.artifacts);
-        // Restore findings (rehydrate regex)
         if (data.findings) {
-          const rehydrated = data.findings.map(f => ({
-            ...f,
-            pattern: f.pattern?.source ? new RegExp(f.pattern.source, f.pattern.flags || "gi") : /./gi,
-            altPatterns: (f.altPatterns || []).map(p => p?.source ? new RegExp(p.source, p.flags || "gi") : /./gi),
-            providerFilter: f.providerFilter?.source ? new RegExp(f.providerFilter.source, f.providerFilter.flags || "i") : null,
-            providerExclude: f.providerExclude?.source ? new RegExp(f.providerExclude.source, f.providerExclude.flags || "i") : null,
-          }));
-          setFindings(rehydrated);
-          if (rehydrated.length > 0) setExpandedFindings(new Set([rehydrated[0].id]));
+          setFindings(data.findings);
+          if (data.findings.length > 0) setExpandedFindings(new Set([data.findings[0].id]));
         }
-        // Restore score
         if (data.overallScore) setOverallScore(data.overallScore);
-        // Restore custom rules
-        if (data.customRules) {
-          const restored = {};
-          for (const [key, rules] of Object.entries(data.customRules)) {
-            restored[key] = rules.map(r => ({
-              ...r,
-              pattern: r.pattern?.source ? new RegExp(r.pattern.source, r.pattern.flags || "gi") : new RegExp(r.pattern || ".", "gi"),
-              altPatterns: (r.altPatterns || []).map(p => p?.source ? new RegExp(p.source, p.flags || "gi") : new RegExp(p || ".", "gi")),
-              providerFilter: r.providerFilter?.source ? new RegExp(r.providerFilter.source, r.providerFilter.flags || "i") : null,
-              providerExclude: r.providerExclude?.source ? new RegExp(r.providerExclude.source, r.providerExclude.flags || "i") : null,
-              keywords: r.keywords || [],
-              mitre: r.mitre || [],
-              nextSteps: r.nextSteps || []
-            }));
-          }
-          setCustomRules(restored);
-        }
-        // Restore IOCs
         if (data.iocList) setIocList(data.iocList);
         if (data.iocEnabled !== undefined) setIocEnabled(data.iocEnabled);
         setActiveTab("analyze");
@@ -2937,42 +1876,6 @@ export default function SigilDFIR() {
   const clearIocs = () => setIocList([]);
 
   // Build IOC detection rule dynamically
-  const buildIocRule = () => {
-    if (!iocList.length) return null;
-    const ips = iocList.filter(i => i.type === "ip").map(i => i.value.replace(/\./g, "\\."));
-    const domains = iocList.filter(i => i.type === "domain").map(i => i.value.replace(/\./g, "\\."));
-    const allEscaped = [...ips, ...domains];
-    if (allEscaped.length === 0) return null;
-
-    // Split into chunks if too many IOCs (regex length limit)
-    const chunkSize = 50;
-    const rules = [];
-    for (let i = 0; i < allEscaped.length; i += chunkSize) {
-      const chunk = allEscaped.slice(i, i + chunkSize);
-      const patternStr = chunk.join("|");
-      const ruleNum = rules.length + 1;
-      rules.push({
-        id: `IOC-${String(ruleNum).padStart(3, "0")}`,
-        name: `IOC Match${rules.length > 0 ? ` (batch ${ruleNum})` : ""} — ${ips.length > 0 ? `${ips.length} IPs` : ""}${ips.length > 0 && domains.length > 0 ? " + " : ""}${domains.length > 0 ? `${domains.length} domains` : ""}`,
-        description: `Matches against user-provided Indicators of Compromise. ${iocList.length} IOCs loaded (${ips.length} IPs, ${domains.length} domains).`,
-        severity: "critical",
-        mitre: ["T1071", "T1105"],
-        pattern: new RegExp(patternStr, "gi"),
-        altPatterns: [],
-        keywords: [],
-        nextSteps: [
-          "CRITICAL: Matched IOC indicates known malicious infrastructure",
-          "Identify the full context — what process/request communicated with this IOC",
-          "Check for data exfiltration or C2 beacon patterns",
-          "Block the IOC at firewall/proxy and search for additional related IOCs",
-          "Pivot on the matched IOC in threat intelligence platforms"
-        ],
-        isIocRule: true
-      });
-    }
-    return rules;
-  };
-
   // ── Tag Input Component ────────────────────────────────────────────────
   const TagInput = ({ tags, onChange, placeholder }) => {
     const [input, setInput] = useState("");

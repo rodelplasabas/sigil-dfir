@@ -3,3 +3,4 @@ uvicorn==0.30.6
 python-evtx==0.7.4
 python-multipart==0.0.9
 pydantic>=2.0
+pyyaml>=6.0

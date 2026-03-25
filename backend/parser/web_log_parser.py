@@ -66,7 +66,7 @@ def _parse_iis_fields_header(lines: list[str]) -> list[str] | None:
     return None
 
 
-def parse_web_logs(raw_content: str, max_events: int = 50000) -> dict:
+def parse_web_logs(raw_content: str, max_events: int = 0) -> dict:
     """
     Parse web access logs into structured events.
     Returns dict with format, event_count, and events list.
@@ -78,7 +78,7 @@ def parse_web_logs(raw_content: str, max_events: int = 50000) -> dict:
     detected_format = "Unknown"
 
     for i, raw_line in enumerate(lines):
-        if len(events) >= max_events:
+        if max_events > 0 and len(events) >= max_events:
             break
 
         line = raw_line.strip()
@@ -157,6 +157,16 @@ def parse_web_logs(raw_content: str, max_events: int = 50000) -> dict:
                 detected_format = "Apache/Nginx"
 
         if parsed:
+            # Skip malformed entries: method must be a valid HTTP method
+            method = parsed.get("method", "")
+            valid_methods = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "PROPFIND", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"}
+            if method.upper() not in valid_methods:
+                continue
+            # Skip if URI contains non-printable characters (binary garbage)
+            uri = parsed.get("uri", "")
+            if any(ord(c) < 32 for c in uri[:200]):
+                continue
+
             full_uri = parsed["uri"]
             if parsed.get("query"):
                 full_uri += f"?{parsed['query']}"

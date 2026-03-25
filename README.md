@@ -10,6 +10,7 @@ SIGIL is an open-source DFIR triage tool designed to help investigators quickly 
 * MITRE ATT&CK mapping
 * Confidence scoring system
 * IOC hunting support
+* Report generation
 
 ## 📸 Preview
 

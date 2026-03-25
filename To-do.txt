@@ -1,3 +1,0 @@
-Filter in Timeline (CRITICAL, HIGH, MEDIUM)
-Option to upload IOC (domain and IP)
-Toggle button to include the uploaded IOCs on the threat hunt search.

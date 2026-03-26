@@ -3,13 +3,13 @@ Registry Export Parser — Parses Windows .reg file exports into structured even
 """
 
 
-def parse_registry(raw_content: str, max_events: int = 50000) -> dict:
+def parse_registry(raw_content: str, max_events: int = 0) -> dict:
     """Parse .reg file content into structured line events."""
     lines = raw_content.split("\n")
     events = []
 
     for i, raw_line in enumerate(lines):
-        if len(events) >= max_events:
+        if max_events > 0 and len(events) >= max_events:
             break
 
         line = raw_line.strip()

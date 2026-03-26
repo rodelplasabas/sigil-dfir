@@ -529,6 +529,13 @@ const STYLES = `
 
   .finding-title { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .finding-header-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .bookmark-btn {
+    background: none; border: none; cursor: pointer; padding: 2px;
+    font-size: 18px; line-height: 1; transition: transform 0.15s;
+    color: var(--text-muted); opacity: 0.4;
+  }
+  .bookmark-btn:hover { opacity: 0.8; transform: scale(1.15); }
+  .bookmark-btn.active { color: var(--accent-orange); opacity: 1; }
   .severity-badge {
     font-family: var(--font-mono);
     font-size: 10px;
@@ -1266,6 +1273,7 @@ export default function SigilDFIR() {
   const [overallScore, setOverallScore] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [expandedFindings, setExpandedFindings] = useState(new Set());
+  const [bookmarkedFindings, setBookmarkedFindings] = useState(new Set());
   const [showPaste, setShowPaste] = useState(false);
   const [filesExpanded, setFilesExpanded] = useState(false);
   const [pasteContent, setPasteContent] = useState("");
@@ -1276,9 +1284,10 @@ export default function SigilDFIR() {
   const [customRules, setCustomRules] = useState({ windows_event_log: [], web_server_log: [], registry: [] });
   const [editingRule, setEditingRule] = useState(null);
   const [showRuleEditor, setShowRuleEditor] = useState(false);
-  const [parsingEvtx, setParsingEvtx] = useState(0);
+  const [parsingFiles, setParsingFiles] = useState(0);
   const [backendUrl, setBackendUrl] = useState("http://127.0.0.1:8001");
   const [showBackendConfig, setShowBackendConfig] = useState(false);
+  const [showReportMenu, setShowReportMenu] = useState(false);
   const [backendStatus, setBackendStatus] = useState(null);
   const [evidenceViewer, setEvidenceViewer] = useState(null);
   const [caseMeta, setCaseMeta] = useState({ name: "", examiner: "", description: "", createdAt: null });
@@ -1295,23 +1304,23 @@ export default function SigilDFIR() {
   // Parse EVTX via backend API
   // ── File Upload via Backend /parse ─────────────────────────────────
   const parseViaBackend = useCallback(async (file) => {
-    setParsingEvtx(prev => prev + 1);
+    setParsingFiles(prev => prev + 1);
     try {
       const formData = new FormData();
       formData.append("file", file);
       const res = await fetch(`${backendUrl}/parse`, { method: "POST", body: formData });
       const data = await res.json();
-      if (data.status === "success" && data.events) {
+      if (data.status === "success") {
         setArtifacts(prev => [...prev, {
           name: file.name,
           size: file.size,
           file,
-          content: data.events.map(e => e.content || e.message || "").join("\n"),
+          content: "",  // Content lives on backend; not stored in browser
           logType: data.log_type || "unknown",
           timestamp: Date.now(),
           parsedBackend: true,
           eventCount: data.event_count,
-          events: data.events,
+          events: null,  // Events stay on backend; /analyze returns matched evidence only
           webLogFormat: data.format || "Unknown",
           hashes: data.hashes || null
         }]);
@@ -1334,7 +1343,7 @@ export default function SigilDFIR() {
       };
       reader.readAsText(file);
     } finally {
-      setParsingEvtx(prev => prev - 1);
+      setParsingFiles(prev => prev - 1);
     }
   }, [backendUrl]);
 
@@ -1380,11 +1389,28 @@ export default function SigilDFIR() {
     setArtifacts(prev => prev.filter((_, i) => i !== idx));
   }, []);
 
-  const generateReport = useCallback(async () => {
+  const generateReport = useCallback(async (mode = "all") => {
     try {
+      let reportFindings = findings;
+      let reportLabel = "Full Report";
+      if (mode === "bookmarked") {
+        reportFindings = findings.filter(f => bookmarkedFindings.has(f.id));
+        reportLabel = "Bookmarked Findings";
+        if (reportFindings.length === 0) {
+          alert("No bookmarked findings. Click the ☆ star on findings to bookmark them for the report.");
+          return;
+        }
+      } else if (mode === "critical-high") {
+        reportFindings = findings.filter(f => f.severity === "critical" || f.severity === "high");
+        reportLabel = "Critical & High Findings";
+      } else if (mode === "critical") {
+        reportFindings = findings.filter(f => f.severity === "critical");
+        reportLabel = "Critical Findings Only";
+      }
+
       const payload = {
-        case_meta: caseMeta,
-        findings: findings.map(f => ({
+        case_meta: { ...caseMeta, report_scope: reportLabel },
+        findings: reportFindings.map(f => ({
           id: f.id,
           name: f.name,
           description: f.description || "",
@@ -1432,7 +1458,7 @@ export default function SigilDFIR() {
       alert("Report generation failed: " + err.message);
       console.error("Report error:", err);
     }
-  }, [findings, overallScore, artifacts, caseMeta, iocList, backendUrl]);
+  }, [findings, overallScore, artifacts, caseMeta, iocList, backendUrl, bookmarkedFindings]);
 
   const runAnalysis = useCallback(async () => {
     setScanning(true);
@@ -1474,7 +1500,8 @@ export default function SigilDFIR() {
                   content: e.content,
                   message: e.message,
                   structuredFields: e.fields,
-                  line_index: e.line_index
+                  line_index: e.line_index,
+                  context: e.context || []
                 })),
                 nextSteps: f.next_steps || [],
                 isIocRule: f.is_ioc_rule || false,
@@ -1518,6 +1545,14 @@ export default function SigilDFIR() {
 
   const toggleFinding = (id) => {
     setExpandedFindings(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const toggleBookmark = (id) => {
+    setBookmarkedFindings(prev => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
@@ -1849,7 +1884,8 @@ export default function SigilDFIR() {
       findings: lightFindings,
       overallScore,
       iocList: iocList,
-      iocEnabled: iocEnabled
+      iocEnabled: iocEnabled,
+      bookmarkedFindings: [...bookmarkedFindings]
     };
   };
 
@@ -1882,6 +1918,7 @@ export default function SigilDFIR() {
         if (data.overallScore) setOverallScore(data.overallScore);
         if (data.iocList) setIocList(data.iocList);
         if (data.iocEnabled !== undefined) setIocEnabled(data.iocEnabled);
+        if (data.bookmarkedFindings) setBookmarkedFindings(new Set(data.bookmarkedFindings));
         setActiveTab("analyze");
         setTimelinePage(0);
       } catch (err) {
@@ -2276,10 +2313,20 @@ export default function SigilDFIR() {
                             <td><span className="evidence-timestamp">{ts}</span></td>
                             <td className="evidence-content">
                               {highlightContent(contentText, isExpanded ? 99999 : 200)}
-                              {contentText.length > 200 && (
+                              {(contentText.length > 200 || (ev.context && ev.context.length > 0)) && (
                                 <button className="evidence-expand-btn" onClick={() => toggleRow(idx)}>
-                                  {isExpanded ? "▲ Collapse" : "▼ Show more"}
+                                  {isExpanded ? "▲ Collapse" : `▼ Show more${ev.context?.length ? ` (+${ev.context.length} context lines)` : ""}`}
                                 </button>
+                              )}
+                              {isExpanded && ev.context && ev.context.length > 0 && (
+                                <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px dashed var(--border-primary)" }}>
+                                  <span style={{ fontSize: 9, color: "var(--accent-purple)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>CONTEXT (lines below match):</span>
+                                  {ev.context.map((ctx, ci) => (
+                                    <div key={ci} style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", padding: "2px 0 2px 12px", borderLeft: "2px solid var(--accent-purple)", marginTop: 3 }}>
+                                      {highlightContent(ctx, 200)}
+                                    </div>
+                                  ))}
+                                </div>
                               )}
                               {isExpanded && fields && Object.keys(fields).length > 0 && (
                                 <div className="evidence-fields">
@@ -2400,7 +2447,7 @@ export default function SigilDFIR() {
                 </div>
                 <div className={`backend-status-msg ${backendStatus === "ok" ? "valid" : backendStatus === "error" ? "invalid" : ""}`} style={{ color: backendStatus === "ok" ? "var(--accent-green)" : backendStatus === "error" ? "var(--accent-red)" : "var(--text-muted)" }}>
                   {backendStatus === "ok" && "✓ Backend connected"}
-                  {backendStatus === "error" && "✗ Cannot reach backend — EVTX files will use text fallback"}
+                  {backendStatus === "error" && "✗ Cannot reach backend — parsing and detection unavailable"}
                   {backendStatus === null && "Click Test to check connection"}
                 </div>
                 <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 10, lineHeight: 1.5 }}>
@@ -2443,7 +2490,7 @@ export default function SigilDFIR() {
                 </div>
                 <div className="form-group">
                   <label className="form-label">Examiner</label>
-                  <input className="form-input" value={caseMeta.examiner} onChange={(e) => setCaseMeta(prev => ({ ...prev, examiner: e.target.value }))} placeholder="e.g. Examiner" />
+                  <input className="form-input" value={caseMeta.examiner} onChange={(e) => setCaseMeta(prev => ({ ...prev, examiner: e.target.value }))} placeholder="e.g. Rodel" />
                 </div>
                 <div className="form-group">
                   <label className="form-label">Description</label>
@@ -2812,10 +2859,10 @@ export default function SigilDFIR() {
             )}
 
             {/* EVTX Parsing Progress */}
-            {parsingEvtx > 0 && (
+            {parsingFiles > 0 && (
               <div className="parsing-banner">
                 <div className="parsing-spinner" />
-                <span>Parsing {parsingEvtx} EVTX file{parsingEvtx !== 1 ? "s" : ""} via backend...</span>
+                <span>Parsing {parsingFiles} file{parsingFiles !== 1 ? "s" : ""}.</span>
               </div>
             )}
 
@@ -2888,7 +2935,7 @@ export default function SigilDFIR() {
               <button
                 className="run-btn"
                 onClick={runAnalysis}
-                disabled={artifacts.length === 0 || scanning || parsingEvtx > 0}
+                disabled={artifacts.length === 0 || scanning || parsingFiles > 0}
               >
                 <Icons.Search /> Run Threat Hunt
                 {iocEnabled && iocList.length > 0 && (
@@ -2904,9 +2951,41 @@ export default function SigilDFIR() {
                       {f !== "all" && ` (${findings.filter(x => x.severity === f).length})`}
                     </button>
                   ))}
-                  <button className="btn btn-primary" style={{ marginLeft: "auto", fontSize: 11, padding: "5px 14px", display: "inline-flex", alignItems: "center", gap: 6 }} onClick={generateReport}>
-                    <Icons.File /> Generate Report
-                  </button>
+                  <div style={{ marginLeft: "auto", position: "relative" }}>
+                    <button className="btn btn-primary" style={{ fontSize: 11, padding: "5px 14px", display: "inline-flex", alignItems: "center", gap: 6 }}
+                      onClick={() => setShowReportMenu(!showReportMenu)}>
+                      <Icons.File /> Generate Report ▾
+                    </button>
+                    {showReportMenu && (
+                      <div style={{
+                        position: "absolute", right: 0, top: "100%", marginTop: 4, zIndex: 100,
+                        background: "var(--bg-card)", border: "1px solid var(--border-primary)",
+                        borderRadius: "var(--radius-lg)", boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                        minWidth: 220, overflow: "hidden"
+                      }}>
+                        {[
+                          { mode: "all", label: "All Findings", desc: `${findings.length} findings` },
+                          { mode: "bookmarked", label: "★ Bookmarked Only", desc: `${bookmarkedFindings.size} bookmarked` },
+                          { mode: "critical-high", label: "Critical & High", desc: `${findings.filter(f => f.severity === "critical" || f.severity === "high").length} findings` },
+                          { mode: "critical", label: "Critical Only", desc: `${findings.filter(f => f.severity === "critical").length} findings` },
+                        ].map(opt => (
+                          <button key={opt.mode}
+                            style={{
+                              display: "block", width: "100%", padding: "10px 16px", border: "none",
+                              background: "transparent", color: "var(--text-primary)", textAlign: "left",
+                              cursor: "pointer", fontSize: 12, fontFamily: "var(--font-mono)",
+                              borderBottom: "1px solid var(--border-primary)",
+                            }}
+                            onMouseEnter={(e) => e.currentTarget.style.background = "var(--bg-card-hover)"}
+                            onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}
+                            onClick={() => { setShowReportMenu(false); generateReport(opt.mode); }}>
+                            <div style={{ fontWeight: 600 }}>{opt.label}</div>
+                            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>{opt.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -2976,7 +3055,13 @@ export default function SigilDFIR() {
 
                 {/* Findings */}
                 <div className="findings-section">
-                  <h2><Icons.AlertTriangle /> Findings</h2>
+                  <h2><Icons.AlertTriangle /> Findings
+                    {bookmarkedFindings.size > 0 && (
+                      <span style={{ fontSize: 11, fontWeight: 400, color: "var(--accent-orange)", marginLeft: 8 }}>
+                        ★ {bookmarkedFindings.size} bookmarked
+                      </span>
+                    )}
+                  </h2>
                   {filteredFindings.length === 0 && (
                     <div className="empty-state" style={{ padding: 40 }}>
                       <p>No findings match the current filter.</p>
@@ -2993,6 +3078,11 @@ export default function SigilDFIR() {
                             <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{f.id}</span>
                           </div>
                           <div className="finding-header-right">
+                            <button className={`bookmark-btn ${bookmarkedFindings.has(f.id) ? "active" : ""}`}
+                              onClick={(e) => { e.stopPropagation(); toggleBookmark(f.id); }}
+                              title={bookmarkedFindings.has(f.id) ? "Remove bookmark" : "Bookmark for report"}>
+                              {bookmarkedFindings.has(f.id) ? "★" : "☆"}
+                            </button>
                             <div className="confidence-meter">
                               <div className="confidence-bar-bg">
                                 <div className="confidence-bar-fill" style={{ width: `${f.confidence}%`, background: getConfidenceColor(f.confidence) }} />

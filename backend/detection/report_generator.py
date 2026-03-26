@@ -213,16 +213,20 @@ def generate_report(
     description = case_meta.get("description", "") if case_meta else ""
     report_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    meta_table = doc.add_table(rows=4, cols=2)
-    meta_table.style = "Table Grid"
-    meta_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    report_scope = case_meta.get("report_scope", "Full Report") if case_meta else "Full Report"
 
     meta_items = [
         ("Case Name", case_name),
         ("Examiner", examiner),
         ("Report Date", report_date),
+        ("Report Scope", report_scope),
         ("Artifacts Analyzed", str(len(artifacts)) if artifacts else "0"),
     ]
+
+    meta_table = doc.add_table(rows=len(meta_items), cols=2)
+    meta_table.style = "Table Grid"
+    meta_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
     for i, (label, value) in enumerate(meta_items):
         cell_label = meta_table.rows[i].cells[0]
         cell_label.text = ""

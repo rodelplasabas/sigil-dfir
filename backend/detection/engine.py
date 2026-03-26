@@ -85,7 +85,7 @@ def run_detection(events: list[dict], log_type: str, rules: list[dict],
         matched_events = []
         match_excerpts = []
 
-        for ev in events:
+        for ev_idx, ev in enumerate(events):
             content = ev.get("content") or ev.get("message", "")
             if not content:
                 continue
@@ -114,6 +114,18 @@ def run_detection(events: list[dict], log_type: str, rules: list[dict],
                     line_matched = True
 
             if line_matched:
+                # Capture context: up to 5 lines after the match
+                context_lines = []
+                for offset in range(1, 6):
+                    if ev_idx + offset < len(events):
+                        ctx = events[ev_idx + offset]
+                        ctx_content = ctx.get("content") or ctx.get("message", "")
+                        if ctx_content:
+                            # Stop context at next registry key header or blank
+                            if ctx_content.startswith("[HKEY_") or ctx_content.startswith("[HKLM") or ctx_content.startswith("[-"):
+                                break
+                            context_lines.append(ctx_content[:200])
+
                 matched_events.append({
                     "timestamp": ev.get("timestamp"),
                     "event_id": ev.get("event_id"),
@@ -121,7 +133,8 @@ def run_detection(events: list[dict], log_type: str, rules: list[dict],
                     "content": content[:500] + "…" if len(content) > 500 else content,
                     "message": ev.get("message", ""),
                     "fields": ev.get("fields", {}),
-                    "line_index": ev.get("line_index")
+                    "line_index": ev.get("line_index"),
+                    "context": context_lines
                 })
 
         # Check count threshold (for error-rate type rules)

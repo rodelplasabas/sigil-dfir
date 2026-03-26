@@ -1,0 +1,16 @@
+March 25, 2026 10:38 PM (GMT+8)
+- Initial release.
+
+March 26, 2026 5:45 AM (GMT+8)
+- Moved all parsers to the backend
+
+March 26, 2026 6:57 AM (GMT+8)
+- Fixed SIGMA YAML import
+- Imported SIGMA rules now persist via SQLite
+- Added docx report generation
+
+March 26, 2026 6:50 PM (GMT+8)
+- Added bookmark feature
+- Removed parser max lines limit
+- Fixed registry parser encoding from UTF-8 to UTF-16 LE
+- Added ability to expand results to show more context

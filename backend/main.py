@@ -71,6 +71,21 @@ class RuleUpdate(BaseModel):
     is_enabled: Optional[bool] = None
 
 
+def _decode_text(raw: bytes) -> str:
+    """Decode raw bytes to text, auto-detecting UTF-16/UTF-8/Latin-1 encoding."""
+    # Check for UTF-16 BOM
+    if raw[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        return raw.decode("utf-16", errors="replace")
+    # Check for UTF-16LE without BOM (null bytes between ASCII chars)
+    if len(raw) > 4 and raw[1:2] == b'\x00' and raw[3:4] == b'\x00':
+        return raw.decode("utf-16-le", errors="replace")
+    # Check for UTF-8 BOM
+    if raw[:3] == b'\xef\xbb\xbf':
+        return raw[3:].decode("utf-8", errors="replace")
+    # Default UTF-8
+    return raw.decode("utf-8", errors="replace")
+
+
 def detect_log_type(content: str, filename: str) -> str:
     fn = filename.lower()
     if fn.endswith(".evtx") or fn.endswith(".evt"):
@@ -283,12 +298,15 @@ async def parse_artifact(file: UploadFile = File(...)):
                 tmp_path = tmp.name
             content = ""
         else:
-            content = raw.decode("utf-8", errors="replace")
+            content = _decode_text(raw)
         log_type = detect_log_type(content, filename)
         result = parse_file(content, log_type, tmp_path, filename)
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
-        return {"status": "success", "filename": filename, "hashes": file_hashes, **result}
+        return {"status": "success", "filename": filename, "hashes": file_hashes,
+                "log_type": result["log_type"], "format": result["format"],
+                "event_count": result["event_count"],
+                "events": result["events"][:5000]}  # Cap for browser; /analyze runs on ALL events
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -308,14 +326,16 @@ async def analyze_artifact(
                 tmp_path = tmp.name
             content = ""
         else:
-            content = raw.decode("utf-8", errors="replace")
+            content = _decode_text(raw)
         log_type = detect_log_type(content, filename)
         parsed = parse_file(content, log_type, tmp_path, filename)
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
         events = parsed["events"]
+        print(f"[SIGIL] /analyze: {filename}, log_type={log_type}, {len(events)} events parsed")
         # Rules from database
         rules = get_rules_by_type(log_type)
+        print(f"[SIGIL] /analyze: {len(rules)} rules loaded for {log_type}")
         ioc_rules = None
         if ioc_enabled and ioc_list:
             try:
@@ -331,7 +351,7 @@ async def analyze_artifact(
         overall_score = compute_overall_score(findings)
         return {"status": "success", "filename": filename, "log_type": log_type,
                 "format": parsed["format"], "event_count": parsed["event_count"],
-                "events": events,  # No cap; all events returned for evidence viewer
+                "events": [],  # Events are in findings.matched_events; no need to send all raw events
                 "findings": findings,
                 "overall_score": overall_score,
                 "rules_applied": len(rules) + (len(ioc_rules) if ioc_rules else 0)}

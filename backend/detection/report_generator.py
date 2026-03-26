@@ -427,35 +427,105 @@ def generate_report(
                 step_p = doc.add_paragraph(style="List Bullet")
                 _add_styled_run(step_p, str(step), size=10)
 
-        # Evidence sample (first 5 matched events)
+        # Evidence — all events for bookmarked, sample of 5 for others
         matched = f.get("matched_events", [])
+        is_bookmarked = f.get("is_bookmarked", False)
         if matched:
-            ev_heading = doc.add_paragraph()
-            _add_styled_run(ev_heading, f"Evidence Sample ({min(len(matched), 5)} of {len(matched)} events):", bold=True, size=10)
+            if is_bookmarked:
+                ev_heading = doc.add_paragraph()
+                _add_styled_run(ev_heading, f"Bookmarked Evidence ({len(matched)} events):", bold=True, size=10)
+                display_events = matched
+            else:
+                ev_heading = doc.add_paragraph()
+                _add_styled_run(ev_heading, f"Evidence Sample ({min(len(matched), 5)} of {len(matched)} events):", bold=True, size=10)
+                display_events = matched[:5]
 
-            ev_table = doc.add_table(rows=1, cols=4)
-            ev_table.style = "Table Grid"
-            ev_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            # Detect if this is a web log finding (check first event for web fields)
+            is_web = any(ev.get("fields", {}).get("method") for ev in display_events[:3])
 
-            for i, header in enumerate(["Record ID", "Event ID", "Timestamp", "Content (excerpt)"]):
-                cell = ev_table.rows[0].cells[i]
-                cell.text = ""
-                _add_styled_run(cell.paragraphs[0], header, bold=True, size=8, color=COLORS["white"], font_name="Arial")
-                _set_cell_shading(cell, "374151")
+            if is_web:
+                # Web log evidence table with structured columns
+                ev_table = doc.add_table(rows=1, cols=6)
+                ev_table.style = "Table Grid"
+                ev_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for i, header in enumerate(["Line", "IP", "Method", "Status", "Timestamp", "URI"]):
+                    cell = ev_table.rows[0].cells[i]
+                    cell.text = ""
+                    _add_styled_run(cell.paragraphs[0], header, bold=True, size=8, color=COLORS["white"], font_name="Arial")
+                    _set_cell_shading(cell, "374151")
 
-            for ev in matched[:5]:
-                row = ev_table.add_row()
-                row.cells[0].text = str(ev.get("record_id", ""))
-                row.cells[1].text = str(ev.get("event_id", ""))
-                row.cells[2].text = str(ev.get("timestamp", ""))[:19]
-                content = str(ev.get("content", ev.get("message", "")))[:150]
-                row.cells[3].text = content
+                for ev in display_events:
+                    row = ev_table.add_row()
+                    fields = ev.get("fields") or {}
+                    row.cells[0].text = str(ev.get("record_id", ""))
+                    row.cells[1].text = str(fields.get("ip", "—"))
+                    row.cells[2].text = str(fields.get("method", "—"))
+                    row.cells[3].text = str(fields.get("status", "—"))
+                    row.cells[4].text = str(ev.get("timestamp", ""))[:19]
+                    uri = str(fields.get("uri", ""))[:120]
+                    row.cells[5].text = uri
 
-                for cell in row.cells:
-                    for p in cell.paragraphs:
-                        for run in p.runs:
-                            run.font.size = Pt(7)
-                            run.font.name = "Consolas"
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            for run in p.runs:
+                                run.font.size = Pt(7)
+                                run.font.name = "Consolas"
+            else:
+                # Standard evidence table for EVTX / Registry
+                ev_table = doc.add_table(rows=1, cols=4)
+                ev_table.style = "Table Grid"
+                ev_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+                for i, header in enumerate(["Record ID", "Event ID", "Timestamp", "Content"]):
+                    cell = ev_table.rows[0].cells[i]
+                    cell.text = ""
+                    _add_styled_run(cell.paragraphs[0], header, bold=True, size=8, color=COLORS["white"], font_name="Arial")
+                    _set_cell_shading(cell, "374151")
+
+                for ev in display_events:
+                    row = ev_table.add_row()
+                    row.cells[0].text = str(ev.get("record_id", ""))
+                    row.cells[1].text = str(ev.get("event_id", ""))
+                    row.cells[2].text = str(ev.get("timestamp", ""))[:19]
+
+                    # Build meaningful content from structured fields if available
+                    fields = ev.get("fields") or {}
+                    content_parts = []
+
+                    # For PowerShell ScriptBlock events, show the script text
+                    script_block = fields.get("ScriptBlockText", "")
+                    if script_block:
+                        path = fields.get("Path", "")
+                        if path:
+                            content_parts.append(f"Path: {path}")
+                        msg_num = fields.get("MessageNumber", "")
+                        msg_total = fields.get("MessageTotal", "")
+                        if msg_num and msg_total:
+                            content_parts.append(f"ScriptBlock: {msg_num}/{msg_total}")
+                        content_parts.append(f"Script: {script_block[:500]}")
+                    elif fields:
+                        # Show key fields for other EVTX events
+                        skip_keys = {"MessageNumber", "MessageTotal", "ScriptBlockId"}
+                        for k, v in fields.items():
+                            if k in skip_keys or not v:
+                                continue
+                            content_parts.append(f"{k}: {str(v)[:200]}")
+
+                    if content_parts:
+                        content = "\n".join(content_parts)
+                    else:
+                        content = str(ev.get("content", ev.get("message", "")))[:500]
+
+                    # Append context lines if available
+                    context = ev.get("context", [])
+                    if context:
+                        content += "\n--- Context ---\n" + "\n".join(str(c)[:150] for c in context[:5])
+                    row.cells[3].text = content
+
+                    for cell in row.cells:
+                        for p in cell.paragraphs:
+                            for run in p.runs:
+                                run.font.size = Pt(7)
+                                run.font.name = "Consolas"
 
         doc.add_paragraph("")  # Spacer between findings
 

@@ -115,17 +115,19 @@ def detect_log_type(content: str, filename: str) -> str:
 def parse_file(content, log_type, file_path=None, filename=""):
     if log_type == "windows_event_log" and file_path and filename.lower().endswith((".evtx", ".evt")):
         events = parse_evtx(file_path)
+        # Fast parser (evtx_dump) already includes 'content' field; legacy parser may not
         for ev in events:
-            parts = [f"EventID: {ev.get('event_id', '')}",
-                     f"Provider: {ev.get('provider', '')}" if ev.get("provider") else "",
-                     f"Channel: {ev.get('channel', '')}" if ev.get("channel") else "",
-                     f"Timestamp: {ev.get('timestamp', '')}" if ev.get("timestamp") else "",
-                     f"EventRecordID: {ev.get('record_id', '')}" if ev.get("record_id") else "",
-                     ev.get("message", "")]
-            if ev.get("fields"):
-                for k, v in ev["fields"].items():
-                    parts.append(f"{k}: {v}")
-            ev["content"] = " ".join(p for p in parts if p)
+            if not ev.get("content"):
+                parts = [f"EventID: {ev.get('event_id', '')}",
+                         f"Provider: {ev.get('provider', '')}" if ev.get("provider") else "",
+                         f"Channel: {ev.get('channel', '')}" if ev.get("channel") else "",
+                         f"Timestamp: {ev.get('timestamp', '')}" if ev.get("timestamp") else "",
+                         f"EventRecordID: {ev.get('record_id', '')}" if ev.get("record_id") else "",
+                         ev.get("message", "")]
+                if ev.get("fields"):
+                    for k, v in ev["fields"].items():
+                        parts.append(f"{k}: {v}")
+                ev["content"] = " ".join(p for p in parts if p)
         return {"log_type": log_type, "format": "EVTX", "event_count": len(events), "events": events}
     elif log_type == "web_server_log":
         result = parse_web_logs(content)

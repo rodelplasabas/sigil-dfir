@@ -1273,7 +1273,7 @@ export default function SigilDFIR() {
   const [overallScore, setOverallScore] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [expandedFindings, setExpandedFindings] = useState(new Set());
-  const [bookmarkedFindings, setBookmarkedFindings] = useState(new Set());
+  const [bookmarkedEvents, setBookmarkedEvents] = useState(new Set()); // Set of "findingId:recordId" keys
   const [showPaste, setShowPaste] = useState(false);
   const [filesExpanded, setFilesExpanded] = useState(false);
   const [pasteContent, setPasteContent] = useState("");
@@ -1285,7 +1285,9 @@ export default function SigilDFIR() {
   const [editingRule, setEditingRule] = useState(null);
   const [showRuleEditor, setShowRuleEditor] = useState(false);
   const [parsingFiles, setParsingFiles] = useState(0);
-  const [backendUrl, setBackendUrl] = useState("http://127.0.0.1:8001");
+  const [backendUrl, setBackendUrl] = useState(
+    (typeof window !== "undefined" && window.sigil?.backendUrl) || "http://127.0.0.1:8001"
+  );
   const [showBackendConfig, setShowBackendConfig] = useState(false);
   const [showReportMenu, setShowReportMenu] = useState(false);
   const [backendStatus, setBackendStatus] = useState(null);
@@ -1394,10 +1396,18 @@ export default function SigilDFIR() {
       let reportFindings = findings;
       let reportLabel = "Full Report";
       if (mode === "bookmarked") {
-        reportFindings = findings.filter(f => bookmarkedFindings.has(f.id));
-        reportLabel = "Bookmarked Findings";
+        // Filter findings to only include bookmarked events
+        reportFindings = findings.map(f => {
+          const bookmarkedEvts = (f.matchedEvents || []).filter(e => {
+            const rid = e.recordId || e.record_id || "";
+            return bookmarkedEvents.has(`${f.id}:${rid}`);
+          });
+          if (bookmarkedEvts.length === 0) return null;
+          return { ...f, matchedEvents: bookmarkedEvts, matchCount: bookmarkedEvts.length };
+        }).filter(Boolean);
+        reportLabel = `Bookmarked Evidence (${totalBookmarkedEvents} events)`;
         if (reportFindings.length === 0) {
-          alert("No bookmarked findings. Click the ☆ star on findings to bookmark them for the report.");
+          alert("No bookmarked events. Click the ☆ star on individual events in the Evidence Viewer to bookmark them.");
           return;
         }
       } else if (mode === "critical-high") {
@@ -1408,8 +1418,10 @@ export default function SigilDFIR() {
         reportLabel = "Critical Findings Only";
       }
 
+      const isBookmarkedReport = mode === "bookmarked";
       const payload = {
         case_meta: { ...caseMeta, report_scope: reportLabel },
+        is_bookmarked_report: isBookmarkedReport,
         findings: reportFindings.map(f => ({
           id: f.id,
           name: f.name,
@@ -1421,11 +1433,17 @@ export default function SigilDFIR() {
           keyword_hits: f.keywordHits || 0,
           next_steps: f.nextSteps || [],
           is_ioc_rule: f.isIocRule || false,
-          matched_events: (f.matchedEvents || []).slice(0, 10).map(e => ({
+          is_bookmarked: isBookmarkedReport,
+          matched_events: (isBookmarkedReport
+            ? (f.matchedEvents || [])
+            : (f.matchedEvents || []).slice(0, 10)
+          ).map(e => ({
             record_id: e.recordId || e.record_id || "",
             event_id: e.eventId || e.event_id || "",
             timestamp: e.timestamp || "",
-            content: (e.content || e.message || "").slice(0, 200),
+            content: (e.content || e.message || "").slice(0, 1000),
+            context: e.context || [],
+            fields: e.structuredFields || e.fields || null,
           })),
         })),
         overall_score: overallScore,
@@ -1458,7 +1476,7 @@ export default function SigilDFIR() {
       alert("Report generation failed: " + err.message);
       console.error("Report error:", err);
     }
-  }, [findings, overallScore, artifacts, caseMeta, iocList, backendUrl, bookmarkedFindings]);
+  }, [findings, overallScore, artifacts, caseMeta, iocList, backendUrl, bookmarkedEvents]);
 
   const runAnalysis = useCallback(async () => {
     setScanning(true);
@@ -1501,7 +1519,8 @@ export default function SigilDFIR() {
                   message: e.message,
                   structuredFields: e.fields,
                   line_index: e.line_index,
-                  context: e.context || []
+                  context: e.context || [],
+                  eventDataXml: e.event_data_xml || ""
                 })),
                 nextSteps: f.next_steps || [],
                 isIocRule: f.is_ioc_rule || false,
@@ -1551,13 +1570,31 @@ export default function SigilDFIR() {
     });
   };
 
-  const toggleBookmark = (id) => {
-    setBookmarkedFindings(prev => {
+  const toggleEventBookmark = (findingId, recordId) => {
+    const scrollPos = evScrollRef.current?.scrollTop || 0;
+    const key = `${findingId}:${recordId}`;
+    setBookmarkedEvents(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
+    // Restore scroll after re-render
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (evScrollRef.current) evScrollRef.current.scrollTop = scrollPos;
+      });
+    });
   };
+
+  const getBookmarkedCountForFinding = (findingId) => {
+    let count = 0;
+    for (const key of bookmarkedEvents) {
+      if (key.startsWith(findingId + ":")) count++;
+    }
+    return count;
+  };
+
+  const totalBookmarkedEvents = bookmarkedEvents.size;
 
   const filteredFindings = severityFilter === "all" ? findings : findings.filter(f => f.severity === severityFilter);
 
@@ -1885,7 +1922,7 @@ export default function SigilDFIR() {
       overallScore,
       iocList: iocList,
       iocEnabled: iocEnabled,
-      bookmarkedFindings: [...bookmarkedFindings]
+      bookmarkedEvents: [...bookmarkedEvents]
     };
   };
 
@@ -1918,7 +1955,8 @@ export default function SigilDFIR() {
         if (data.overallScore) setOverallScore(data.overallScore);
         if (data.iocList) setIocList(data.iocList);
         if (data.iocEnabled !== undefined) setIocEnabled(data.iocEnabled);
-        if (data.bookmarkedFindings) setBookmarkedFindings(new Set(data.bookmarkedFindings));
+        if (data.bookmarkedEvents) setBookmarkedEvents(new Set(data.bookmarkedEvents));
+        else if (data.bookmarkedFindings) setBookmarkedEvents(new Set(data.bookmarkedFindings)); // backward compat
         setActiveTab("analyze");
         setTimelinePage(0);
       } catch (err) {
@@ -2144,17 +2182,25 @@ export default function SigilDFIR() {
   };
 
   // ── Evidence Viewer Modal ──────────────────────────────────────────────
-  const EvidenceViewerModal = () => {
-    const [expandedRows, setExpandedRows] = useState(new Set());
-    const [searchFilter, setSearchFilter] = useState("");
+  const [evExpandedRows, setEvExpandedRows] = useState(new Set());
+  const [evSearchFilter, setEvSearchFilter] = useState("");
+  const evScrollRef = useRef(null);
 
+  // Reset evidence viewer state when opening a new finding
+  const openEvidenceViewer = useCallback((finding) => {
+    setEvExpandedRows(new Set());
+    setEvSearchFilter("");
+    setEvidenceViewer({ finding });
+  }, []);
+
+  const EvidenceViewerModal = () => {
     if (!evidenceViewer) return null;
     const { finding } = evidenceViewer;
     const events = finding.matchedEvents || [];
     
-    const filtered = searchFilter.trim()
+    const filtered = evSearchFilter.trim()
       ? events.filter(e => {
-          const s = searchFilter.toLowerCase();
+          const s = evSearchFilter.toLowerCase();
           const f = e.structuredFields || e.fields || {};
           return (e.content || "").toLowerCase().includes(s) ||
             (e.eventId || "").includes(s) ||
@@ -2171,16 +2217,23 @@ export default function SigilDFIR() {
       : events;
 
     const toggleRow = (idx) => {
-      setExpandedRows(prev => {
+      const scrollPos = evScrollRef.current?.scrollTop || 0;
+      setEvExpandedRows(prev => {
         const next = new Set(prev);
         next.has(idx) ? next.delete(idx) : next.add(idx);
         return next;
+      });
+      // Double-RAF: first waits for React commit, second waits for DOM paint
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (evScrollRef.current) evScrollRef.current.scrollTop = scrollPos;
+        });
       });
     };
 
     const highlightContent = (text, maxLen = 200) => {
       if (!text) return "";
-      const display = expandedRows.has("full") ? text : text.slice(0, maxLen);
+      const display = evExpandedRows.has("full") ? text : text.slice(0, maxLen);
       // Highlight keywords from the rule
       let highlighted = display;
       const kws = (finding.keywords || []).slice(0, 8);
@@ -2232,11 +2285,11 @@ export default function SigilDFIR() {
           <div className="evidence-search">
             <input
               placeholder={finding.logType === "web_server_log" ? "Filter by IP, method, status code, URI, or content..." : "Filter by Event ID, Record ID, or content..."}
-              value={searchFilter}
-              onChange={(e) => setSearchFilter(e.target.value)}
+              value={evSearchFilter}
+              onChange={(e) => setEvSearchFilter(e.target.value)}
             />
           </div>
-          <div style={{ overflowY: "auto", maxHeight: "calc(90vh - 200px)" }}>
+          <div ref={evScrollRef} style={{ overflowY: "auto", maxHeight: "calc(90vh - 200px)" }}>
             {filtered.length === 0 ? (
               <div className="empty-state" style={{ padding: 40 }}>
                 <p>{events.length === 0 ? "No event-level evidence captured for this finding." : "No events match your filter."}</p>
@@ -2245,7 +2298,8 @@ export default function SigilDFIR() {
               <table className="evidence-table">
                 <thead>
                   <tr>
-                    <th style={{ width: 40 }}>#</th>
+                    <th style={{ width: 30 }}>☆</th>
+                    <th style={{ width: 30 }}>#</th>
                     {finding.logType === "web_server_log" ? (
                       <>
                         <th style={{ width: 60 }}>Line</th>
@@ -2270,13 +2324,22 @@ export default function SigilDFIR() {
                     const rid = ev.recordId || ev.record_id || "—";
                     const eid = ev.eventId || ev.event_id || "—";
                     const ts = ev.timestamp || "—";
-                    const isExpanded = expandedRows.has(idx);
+                    const isExpanded = evExpandedRows.has(idx);
                     const contentText = ev.content || ev.message || "";
                     const fields = ev.structuredFields || ev.fields || null;
                     const isWeb = finding.logType === "web_server_log";
+                    const evBookmarkKey = `${finding.id}:${rid}`;
+                    const isBookmarked = bookmarkedEvents.has(evBookmarkKey);
 
                     return (
-                      <tr key={idx} className={`severity-row-${finding.severity}`}>
+                      <tr key={idx} className={`severity-row-${finding.severity}`} style={isBookmarked ? { background: "rgba(245, 158, 11, 0.08)" } : {}}>
+                        <td style={{ textAlign: "center", cursor: "pointer", fontSize: 16 }}
+                          onClick={() => toggleEventBookmark(finding.id, rid)}
+                          title={isBookmarked ? "Remove bookmark" : "Bookmark this event for report"}>
+                          <span style={{ color: isBookmarked ? "var(--accent-orange)" : "var(--text-muted)", opacity: isBookmarked ? 1 : 0.3 }}>
+                            {isBookmarked ? "★" : "☆"}
+                          </span>
+                        </td>
                         <td style={{ color: "var(--text-muted)", fontSize: 10 }}>{idx + 1}</td>
                         {isWeb ? (
                           <>
@@ -2312,28 +2375,56 @@ export default function SigilDFIR() {
                             <td><span className="evidence-event-id">{eid}</span></td>
                             <td><span className="evidence-timestamp">{ts}</span></td>
                             <td className="evidence-content">
-                              {highlightContent(contentText, isExpanded ? 99999 : 200)}
-                              {(contentText.length > 200 || (ev.context && ev.context.length > 0)) && (
-                                <button className="evidence-expand-btn" onClick={() => toggleRow(idx)}>
-                                  {isExpanded ? "▲ Collapse" : `▼ Show more${ev.context?.length ? ` (+${ev.context.length} context lines)` : ""}`}
-                                </button>
+                              {/* Collapsed: show brief summary */}
+                              {!isExpanded && (
+                                <div style={{ fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                                  {fields?.ScriptBlockText ? (
+                                    <span>{fields.ScriptBlockText.slice(0, 150)}{fields.ScriptBlockText.length > 150 ? "…" : ""}</span>
+                                  ) : fields && Object.keys(fields).length > 0 ? (
+                                    Object.entries(fields).slice(0, 2).map(([k, v]) => (
+                                      <div key={k} style={{ marginBottom: 2 }}>
+                                        <span style={{ color: "var(--accent-cyan)" }}>{k}: </span>
+                                        <span style={{ wordBreak: "break-all" }}>{v && v.length > 100 ? v.slice(0, 100) + "…" : v}</span>
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <span>{contentText.slice(0, 150)}{contentText.length > 150 ? "…" : ""}</span>
+                                  )}
+                                </div>
                               )}
-                              {isExpanded && ev.context && ev.context.length > 0 && (
+                              {/* Expanded: show full EventData XML or full fields */}
+                              {isExpanded && (
+                                <div>
+                                  {ev.eventDataXml ? (
+                                    <div>
+                                      <span style={{ fontSize: 9, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>EVENT DATA (XML):</span>
+                                      <pre style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", background: "var(--bg-primary)", padding: 8, borderRadius: 4, marginTop: 4, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 500, overflowY: "auto", border: "1px solid var(--border-primary)" }}>
+                                        {ev.eventDataXml}
+                                      </pre>
+                                    </div>
+                                  ) : fields && Object.keys(fields).length > 0 ? (
+                                    <div className="evidence-fields">
+                                      {Object.entries(fields).map(([k, v]) => (
+                                        <div key={k}>
+                                          <span className="field-name">{k}:</span>
+                                          <span className="field-value" style={{ wordBreak: "break-all" }}>{v}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div style={{ fontSize: 11, fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{contentText}</div>
+                                  )}
+                                </div>
+                              )}
+                              <button className="evidence-expand-btn" onClick={() => toggleRow(idx)}>
+                                {isExpanded ? "▲ Collapse" : `▼ Show more${ev.eventDataXml ? " (Event Data XML)" : ""}${ev.context?.length ? ` (+${ev.context.length} context)` : ""}`}
+                              </button>
+                              {isExpanded && !ev.eventDataXml && ev.context && ev.context.length > 0 && (
                                 <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px dashed var(--border-primary)" }}>
                                   <span style={{ fontSize: 9, color: "var(--accent-purple)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>CONTEXT (lines below match):</span>
                                   {ev.context.map((ctx, ci) => (
                                     <div key={ci} style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", padding: "2px 0 2px 12px", borderLeft: "2px solid var(--accent-purple)", marginTop: 3 }}>
                                       {highlightContent(ctx, 200)}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                              {isExpanded && fields && Object.keys(fields).length > 0 && (
-                                <div className="evidence-fields">
-                                  {Object.entries(fields).map(([k, v]) => (
-                                    <div key={k}>
-                                      <span className="field-name">{k}:</span>
-                                      <span className="field-value">{v && v.length > 300 ? v.slice(0, 300) + "…" : v}</span>
                                     </div>
                                   ))}
                                 </div>
@@ -2702,7 +2793,7 @@ export default function SigilDFIR() {
                                 matchedEvents: ev.event ? [ev.event] : [],
                                 _timelineClick: true
                               };
-                              setEvidenceViewer({ finding: singleEventFinding });
+                              openEvidenceViewer(singleEventFinding);
                             }}
                           >
                             <div className="timeline-dot" style={{ background: `var(--severity-${ev.severity})`, boxShadow: `0 0 6px var(--severity-${ev.severity})` }} />
@@ -2965,7 +3056,7 @@ export default function SigilDFIR() {
                       }}>
                         {[
                           { mode: "all", label: "All Findings", desc: `${findings.length} findings` },
-                          { mode: "bookmarked", label: "★ Bookmarked Only", desc: `${bookmarkedFindings.size} bookmarked` },
+                          { mode: "bookmarked", label: "★ Bookmarked Only", desc: `${totalBookmarkedEvents} bookmarked` },
                           { mode: "critical-high", label: "Critical & High", desc: `${findings.filter(f => f.severity === "critical" || f.severity === "high").length} findings` },
                           { mode: "critical", label: "Critical Only", desc: `${findings.filter(f => f.severity === "critical").length} findings` },
                         ].map(opt => (
@@ -3056,9 +3147,9 @@ export default function SigilDFIR() {
                 {/* Findings */}
                 <div className="findings-section">
                   <h2><Icons.AlertTriangle /> Findings
-                    {bookmarkedFindings.size > 0 && (
+                    {totalBookmarkedEvents > 0 && (
                       <span style={{ fontSize: 11, fontWeight: 400, color: "var(--accent-orange)", marginLeft: 8 }}>
-                        ★ {bookmarkedFindings.size} bookmarked
+                        ★ {totalBookmarkedEvents} bookmarked
                       </span>
                     )}
                   </h2>
@@ -3078,11 +3169,11 @@ export default function SigilDFIR() {
                             <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{f.id}</span>
                           </div>
                           <div className="finding-header-right">
-                            <button className={`bookmark-btn ${bookmarkedFindings.has(f.id) ? "active" : ""}`}
-                              onClick={(e) => { e.stopPropagation(); toggleBookmark(f.id); }}
-                              title={bookmarkedFindings.has(f.id) ? "Remove bookmark" : "Bookmark for report"}>
-                              {bookmarkedFindings.has(f.id) ? "★" : "☆"}
-                            </button>
+                            {getBookmarkedCountForFinding(f.id) > 0 && (
+                              <span style={{ fontSize: 11, color: "var(--accent-orange)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
+                                ★ {getBookmarkedCountForFinding(f.id)}
+                              </span>
+                            )}
                             <div className="confidence-meter">
                               <div className="confidence-bar-bg">
                                 <div className="confidence-bar-fill" style={{ width: `${f.confidence}%`, background: getConfidenceColor(f.confidence) }} />
@@ -3143,7 +3234,7 @@ export default function SigilDFIR() {
                             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                               <button
                                 className="btn btn-primary"
-                                onClick={() => setEvidenceViewer({ finding: f })}
+                                onClick={() => openEvidenceViewer(f)}
                                 style={{ fontSize: 12 }}
                               >
                                 <Icons.Search /> View Evidence ({(f.matchedEvents || []).length} events)

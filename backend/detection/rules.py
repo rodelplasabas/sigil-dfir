@@ -238,6 +238,63 @@ DETECTION_RULES = {
                 "Preserve network traffic logs for C2 and exfiltration evidence",
                 "Engage incident response team and consider disconnecting from network"
             ]
+        },
+        {
+            "id": "WIN-012",
+            "name": "Anonymous / NTLM Logon from Remote IP",
+            "description": "Detects ANONYMOUS LOGON events (EventID 4624) from remote IP addresses using NTLM authentication. May indicate SMB enumeration, null session attacks, or NTLM relay attempts.",
+            "severity": "medium",
+            "mitre": ["T1187", "T1557"],
+            "pattern": r"EventID[:\s]*4624",
+            "alt_patterns": [r"ANONYMOUS\s+LOGON.*(?:NTLM|NtLmSsp)", r"NtLmSsp.*ANONYMOUS"],
+            "keywords": ["anonymous logon", "ntlm", "ntlmssp", "null session", "logon type 3"],
+            "provider_filter": r"security-auditing|security",
+            "provider_exclude": None,
+            "next_steps": [
+                "Check if ANONYMOUS LOGON is expected in this environment (some legacy apps use it)",
+                "Investigate the source IP — is it an internal workstation, server, or unknown host?",
+                "Look for SMB enumeration: net view, net use, share access from the same source",
+                "Check for NTLM relay attacks — review Event ID 4648 for explicit credential usage",
+                "Consider disabling NTLM or restricting anonymous access via Group Policy"
+            ]
+        },
+        {
+            "id": "WIN-013",
+            "name": "Pass-the-Hash / Explicit Credential Logon",
+            "description": "Detects explicit credential logon events (EventID 4648) which may indicate pass-the-hash, RunAs abuse, or lateral movement with stolen credentials.",
+            "severity": "high",
+            "mitre": ["T1550", "T1078"],
+            "pattern": r"EventID[:\s]*4648",
+            "alt_patterns": [r"explicit\s*credential", r"a logon was attempted using explicit credentials"],
+            "keywords": ["explicit credentials", "runas", "logon attempt", "4648"],
+            "provider_filter": r"security-auditing|security",
+            "provider_exclude": None,
+            "next_steps": [
+                "Identify the process (ProcessName) that initiated the explicit credential logon",
+                "Check if the target server and account are consistent with normal admin activity",
+                "Compare SubjectUserName vs TargetUserName — different users suggest credential theft",
+                "Look for sequential 4648 events to different hosts (lateral movement pattern)",
+                "Cross-reference with failed logons (4625) from the same source"
+            ]
+        },
+        {
+            "id": "WIN-014",
+            "name": "Special Privileges Assigned to New Logon",
+            "description": "Detects assignment of sensitive privileges (EventID 4672) such as SeDebugPrivilege, SeTcbPrivilege, or SeImpersonatePrivilege, which may indicate privilege escalation.",
+            "severity": "medium",
+            "mitre": ["T1134", "T1078"],
+            "pattern": r"EventID[:\s]*4672",
+            "alt_patterns": [r"special\s*privileges.*assigned", r"(?:SeDebugPrivilege|SeTcbPrivilege|SeBackupPrivilege|SeRestorePrivilege|SeImpersonatePrivilege|SeAssignPrimaryTokenPrivilege)"],
+            "keywords": ["special privileges", "SeDebugPrivilege", "SeTcbPrivilege", "SeImpersonatePrivilege", "privilege escalation"],
+            "provider_filter": r"security-auditing|security",
+            "provider_exclude": None,
+            "next_steps": [
+                "Check which account received the privileges — is it expected for this user?",
+                "SeDebugPrivilege allows reading any process memory (used in credential dumping)",
+                "SeTcbPrivilege is 'Act as part of the operating system' — extremely sensitive",
+                "SeImpersonatePrivilege can be abused for token impersonation attacks (potato attacks)",
+                "Review if the logon source is unusual (remote RDP, network logon from unexpected IP)"
+            ]
         }
     ],
     "web_server_log": [

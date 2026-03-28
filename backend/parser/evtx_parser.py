@@ -168,6 +168,7 @@ def _parse_jsonl_record(record):
 
     # UserData fallback
     user_data = event.get("UserData", {})
+    user_data_fields = {}
     if isinstance(user_data, dict) and not event_data_fields:
         for key, value in user_data.items():
             if key.startswith("#") or key == "xmlns":
@@ -178,15 +179,17 @@ def _parse_jsonl_record(record):
                         continue
                     val = _safe_str(v2)
                     event_data_fields[k2] = val
+                    user_data_fields[k2] = val
                     if val:
                         message_parts.append(val)
             else:
                 val = _safe_str(value)
                 event_data_fields[key] = val
+                user_data_fields[key] = val
                 if val:
                     message_parts.append(val)
 
-    event_data_xml = _build_event_data_xml(event_data_fields)
+    event_data_xml = _build_full_event_xml(system, event_data_fields, user_data_fields)
 
     # Defensive: ensure all message_parts are strings
     message_parts = [str(p) for p in message_parts if p]
@@ -209,15 +212,105 @@ def _parse_jsonl_record(record):
     }
 
 
-def _build_event_data_xml(fields):
-    """Reconstruct EventData XML from parsed fields."""
-    if not fields:
-        return ""
-    parts = ['<EventData>']
-    for name, value in fields.items():
-        escaped = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        parts.append(f'  <Data Name="{name}">{escaped}</Data>')
-    parts.append('</EventData>')
+def _build_full_event_xml(system, event_data_fields, user_data_fields=None):
+    """Reconstruct full Event XML from parsed System and EventData fields."""
+    parts = ['<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">']
+
+    # System section
+    parts.append('  <System>')
+
+    provider_data = system.get("Provider", {})
+    if isinstance(provider_data, dict):
+        attrs = provider_data.get("#attributes", {})
+        prov_name = attrs.get("Name", "")
+        prov_guid = attrs.get("Guid", "")
+        if prov_guid:
+            parts.append(f'    <Provider Name="{prov_name}" Guid="{prov_guid}"/>')
+        else:
+            parts.append(f'    <Provider Name="{prov_name}"/>')
+
+    event_id_data = system.get("EventID", "")
+    if isinstance(event_id_data, dict):
+        eid = str(event_id_data.get("#text", event_id_data.get("value", "")))
+    else:
+        eid = str(event_id_data)
+    parts.append(f'    <EventID>{eid}</EventID>')
+
+    for tag in ["Version", "Level", "Task", "Opcode"]:
+        val = system.get(tag)
+        if val is not None:
+            parts.append(f'    <{tag}>{val}</{tag}>')
+
+    keywords = system.get("Keywords")
+    if keywords is not None:
+        parts.append(f'    <Keywords>{keywords}</Keywords>')
+
+    time_created = system.get("TimeCreated", {})
+    if isinstance(time_created, dict):
+        st = time_created.get("#attributes", {}).get("SystemTime", "")
+        if st:
+            parts.append(f'    <TimeCreated SystemTime="{st}"/>')
+
+    record_id = system.get("EventRecordID", "")
+    if record_id:
+        parts.append(f'    <EventRecordID>{record_id}</EventRecordID>')
+
+    correlation = system.get("Correlation", {})
+    if isinstance(correlation, dict):
+        corr_attrs = correlation.get("#attributes", {})
+        activity_id = corr_attrs.get("ActivityID", "")
+        if activity_id:
+            parts.append(f'    <Correlation ActivityID="{activity_id}"/>')
+        else:
+            parts.append('    <Correlation/>')
+    else:
+        parts.append('    <Correlation/>')
+
+    execution = system.get("Execution", {})
+    if isinstance(execution, dict):
+        exec_attrs = execution.get("#attributes", {})
+        pid = exec_attrs.get("ProcessID", "")
+        tid = exec_attrs.get("ThreadID", "")
+        if pid or tid:
+            parts.append(f'    <Execution ProcessID="{pid}" ThreadID="{tid}"/>')
+
+    channel = system.get("Channel", "")
+    if channel:
+        parts.append(f'    <Channel>{channel}</Channel>')
+
+    computer = system.get("Computer", "")
+    if computer:
+        parts.append(f'    <Computer>{computer}</Computer>')
+
+    security = system.get("Security", {})
+    if isinstance(security, dict):
+        sec_attrs = security.get("#attributes", {})
+        user_id = sec_attrs.get("UserID", "")
+        if user_id:
+            parts.append(f'    <Security UserID="{user_id}"/>')
+        else:
+            parts.append('    <Security/>')
+
+    parts.append('  </System>')
+
+    # EventData section
+    if event_data_fields:
+        parts.append('  <EventData>')
+        for name, value in event_data_fields.items():
+            escaped = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            parts.append(f'    <Data Name="{name}">{escaped}</Data>')
+        parts.append('  </EventData>')
+
+    # UserData section (if no EventData)
+    if user_data_fields and not event_data_fields:
+        parts.append('  <UserData>')
+        for name, value in user_data_fields.items():
+            escaped = str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            parts.append(f'    <Data Name="{name}">{escaped}</Data>')
+        parts.append('  </UserData>')
+
+    parts.append('</Event>')
+    return "\n".join(parts)
     return "\n".join(parts)
 
 
@@ -264,7 +357,7 @@ def parse_evtx_legacy(file_path, max_records=0):
 
                 message = ""
                 event_data_fields = {}
-                event_data_xml = ""
+                event_data_xml = xml  # Store the full event XML
 
                 eventdata = root.find("ns:EventData", NAMESPACE)
                 if eventdata is not None:
@@ -275,21 +368,12 @@ def parse_evtx_legacy(file_path, max_records=0):
                             event_data_fields[name] = value
                         if value:
                             message += f"{value} "
-                    try:
-                        event_data_xml = ET.tostring(eventdata, encoding="unicode", method="xml")
-                    except Exception:
-                        pass
 
                 userdata = root.find("ns:UserData", NAMESPACE)
                 if userdata is not None:
                     for elem in userdata.iter():
                         if elem.text and elem.text.strip():
                             message += f"{elem.text.strip()} "
-                    if not event_data_xml:
-                        try:
-                            event_data_xml = ET.tostring(userdata, encoding="unicode", method="xml")
-                        except Exception:
-                            pass
 
                 events.append({
                     "timestamp": timestamp,

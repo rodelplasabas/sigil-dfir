@@ -1,9 +1,69 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, Fragment } from "react";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DFIR COMPROMISE ASSESSMENT TOOL — "SIGIL"
 // Open-source triage assistant for incident responders
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── LATERAL MOVEMENT EVENT ID CATEGORIES ────────────────────────────────────
+const LM_EVENT_CATEGORIES = [
+  { name: "Logon Activity", icon: "🔐", desc: "Critical for lateral movement detection", eids: [
+    { id: "4624", label: "Successful Logon", hint: "Focus on Type 3 (Network) and Type 10 (RDP)", sev: "high" },
+    { id: "4625", label: "Failed Logon", hint: "Brute force attempts before lateral movement", sev: "high" },
+    { id: "4634", label: "Logoff", hint: "Session ended", sev: "low" },
+    { id: "4647", label: "User-Initiated Logoff", hint: "User logoff event", sev: "low" },
+    { id: "4648", label: "Explicit Credentials (RunAs)", hint: "PsExec, RunAs, Pass-the-Hash", sev: "critical" },
+  ]},
+  { name: "Privilege & Token Abuse", icon: "🔑", desc: "Privilege escalation indicators", eids: [
+    { id: "4672", label: "Special Privileges Assigned", hint: "Admin-level logon", sev: "high" },
+    { id: "4673", label: "Sensitive Privilege Use", hint: "Privileged service called", sev: "medium" },
+    { id: "4674", label: "Privileged Object Operation", hint: "Privileged operation attempted", sev: "medium" },
+  ]},
+  { name: "Kerberos Authentication", icon: "🎫", desc: "Pass-the-Ticket, Kerberoasting", eids: [
+    { id: "4768", label: "Kerberos TGT Request", hint: "Ticket Granting Ticket requested", sev: "medium" },
+    { id: "4769", label: "Kerberos Service Ticket", hint: "Spikes may indicate Kerberoasting", sev: "high" },
+    { id: "4776", label: "NTLM Authentication", hint: "NTLM credential validation", sev: "medium" },
+  ]},
+  { name: "Service & Task Creation", icon: "⚙️", desc: "Remote execution via services", eids: [
+    { id: "7045", label: "Service Installed (System)", hint: "Classic PsExec-style indicator", sev: "critical" },
+    { id: "4697", label: "Service Installed (Security)", hint: "Service installation logged", sev: "high" },
+    { id: "4698", label: "Scheduled Task Created", hint: "Remote scheduled task creation", sev: "high" },
+    { id: "4702", label: "Scheduled Task Updated", hint: "Task modified", sev: "medium" },
+  ]},
+  { name: "SMB / File Share Access", icon: "📁", desc: "Network share movement", eids: [
+    { id: "5140", label: "Network Share Accessed", hint: "Share object accessed", sev: "medium" },
+    { id: "5145", label: "Detailed Share Access", hint: "ADMIN$ and C$ access detection", sev: "high" },
+  ]},
+  { name: "Process Creation", icon: "🚀", desc: "Suspicious process execution", eids: [
+    { id: "4688", label: "New Process Created", hint: "Correlate with cmd.exe, powershell.exe, psexecsvc.exe", sev: "high" },
+  ]},
+  { name: "PowerShell", icon: "⚡", desc: "Remote commands and encoded payloads", eids: [
+    { id: "4103", label: "Module Logging", hint: "PowerShell module loaded", sev: "medium" },
+    { id: "4104", label: "Script Block Logging", hint: "Script content captured", sev: "high" },
+  ]},
+  { name: "WMI Execution", icon: "🌐", desc: "Stealthy lateral movement", eids: [
+    { id: "5861", label: "WMI Activity", hint: "WMI-Activity log event", sev: "high" },
+  ]},
+  { name: "RDP Session Lifecycle", icon: "🖥️", desc: "Full RDP session tracking", eids: [
+    { id: "1149", label: "Network Authentication", hint: "TerminalServices-RemoteConnectionManager", sev: "high" },
+    { id: "21", label: "Session Logon", hint: "LocalSessionManager", sev: "medium" },
+    { id: "22", label: "Shell Start", hint: "Shell ready", sev: "low" },
+    { id: "23", label: "Session Logoff", hint: "RDP session ended", sev: "low" },
+    { id: "24", label: "Session Disconnected", hint: "Disconnected (may persist)", sev: "low" },
+    { id: "25", label: "Session Reconnected", hint: "Reconnected to existing session", sev: "medium" },
+    { id: "39", label: "Disconnect by Other", hint: "Session disconnected by another", sev: "low" },
+    { id: "40", label: "Disconnect Reason", hint: "Disconnect with reason code", sev: "low" },
+    { id: "4778", label: "Session Reconnected (Security)", hint: "Window Station reconnect", sev: "medium" },
+    { id: "4779", label: "Session Disconnected (Security)", hint: "Window Station disconnect", sev: "medium" },
+  ]},
+  { name: "Sysmon (If Enabled)", icon: "🔍", desc: "High-value endpoint telemetry", eids: [
+    { id: "1", label: "Process Creation", hint: "Sysmon process create with command line", sev: "high" },
+    { id: "3", label: "Network Connection", hint: "Outbound network connections", sev: "medium" },
+    { id: "10", label: "Process Access", hint: "Credential dumping precursor (LSASS)", sev: "critical" },
+    { id: "11", label: "File Creation", hint: "New files written to disk", sev: "medium" },
+    { id: "22", label: "DNS Query", hint: "DNS resolution logged", sev: "low" },
+  ]},
+];
 
 // ─── MITRE ATT&CK TECHNIQUE DATABASE ─────────────────────────────────────────
 const MITRE_TECHNIQUES = {
@@ -1290,11 +1350,97 @@ export default function SigilDFIR() {
   );
   const [showBackendConfig, setShowBackendConfig] = useState(false);
   const [showReportMenu, setShowReportMenu] = useState(false);
+  const [lateralMovement, setLateralMovement] = useState(null); // { data, loading, error }
+  const [lmTab, setLmTab] = useState("graph"); // graph | timeline | chains | findings
+  const [lmPhase, setLmPhase] = useState("config"); // config | results
+  const [lmSelectedNode, setLmSelectedNode] = useState(null);
+  const [lmNodePositions, setLmNodePositions] = useState({});
+  const [lmSelectedEids, setLmSelectedEids] = useState(new Set([
+    "4624", "4625", "4634", "4647", "4648",  // Logon
+    "4672",                                     // Privilege
+    "4768", "4769", "4776",                     // Kerberos
+    "7045", "4697",                             // Service
+    "4698",                                     // Sched Task
+    "5140", "5145",                             // SMB
+    "4688",                                     // Process
+    "4104",                                     // PowerShell
+    "5861",                                     // WMI
+    "4778", "4779", "1149", "21", "22", "23", "24", "25", "39", "40",  // RDP
+  ]));
+  const lmDragRef = useRef(null);
+  const lmSvgRef = useRef(null);
   const [backendStatus, setBackendStatus] = useState(null);
   const [evidenceViewer, setEvidenceViewer] = useState(null);
+  const [processTree, setProcessTree] = useState(null); // { loading, data, error }
+  const [ptExpandedNodes, setPtExpandedNodes] = useState(new Set());
+  const [ptSevFilter, setPtSevFilter] = useState("all");
+  const [ptSearch, setPtSearch] = useState("");
   const [caseMeta, setCaseMeta] = useState({ name: "", examiner: "", description: "", createdAt: null });
+  const [caseActive, setCaseActive] = useState(false); // true when a case is open with SQLite backend
+  const [caseDir, setCaseDir] = useState("");
+  const [caseLoading, setCaseLoading] = useState(false);
+  const [caseScreen, setCaseScreen] = useState("gate"); // gate | create
+  const [newCaseName, setNewCaseName] = useState("");
+  const [newCaseExaminer, setNewCaseExaminer] = useState("");
+  const [newCaseOrg, setNewCaseOrg] = useState("");
+  const [newCaseDesc, setNewCaseDesc] = useState("");
+  const [newCasePath, setNewCasePath] = useState("");
   const [showCaseModal, setShowCaseModal] = useState(false);
   const [caseModalMode, setCaseModalMode] = useState("create"); // "create" | "save"
+  // ── Case recovery: check if backend has an active case on mount ──
+  useEffect(() => {
+    fetch(`${backendUrl}/case/info`).then(r => r.json()).then(data => {
+      if (data.status === "active" && data.metadata) {
+        setCaseMeta({
+          name: data.metadata.case_name || "",
+          examiner: data.metadata.examiner || "",
+          description: data.metadata.description || "",
+          createdAt: data.metadata.created_at || null,
+        });
+        setCaseDir(data.case_dir || "");
+        setCaseActive(true);
+        if (data.artifacts) {
+          setArtifacts(data.artifacts.map(a => ({
+            name: a.filename, logType: a.log_type, format: a.format,
+            eventCount: a.event_count, id: a.id, sha256: a.sha256,
+            hashes: { md5: a.md5, sha1: a.sha1, sha256: a.sha256, file_size: a.file_size },
+            parsed: true, backendParsed: true,
+          })));
+        }
+        if (data.findings && data.findings.length > 0) {
+          setFindings(data.findings.map((f, idx) => ({
+            id: f.rule_id, dbId: f.id, uid: `${f.rule_id}_${f.id || idx}`, name: f.rule_name,
+            description: f.description, severity: f.severity,
+            mitre: f.mitre || [], matchCount: f.match_count,
+            keywordHits: f.keyword_hits, confidence: f.confidence,
+            nextSteps: f.next_steps || [], isIocRule: f.is_ioc_rule,
+            matchedEvents: (f.matched_events || []).map(e => ({
+              timestamp: e.timestamp, eventId: e.event_id, recordId: e.record_id,
+              content: e.content, message: e.message, fields: e.fields || {},
+              eventDataXml: e.event_data_xml || "", context: e.context || [],
+            })),
+          })));
+        }
+        if (data.overall_score) setOverallScore(data.overall_score);
+        if (data.bookmarks) setBookmarkedEvents(new Set(data.bookmarks));
+        if (data.lm_results) {
+          setLateralMovement({ loading: false, data: data.lm_results, error: null });
+          setLmPhase("results");
+          // Initialize node positions
+          const nodes = data.lm_results?.graph?.nodes || [];
+          const positions = {};
+          const cx = 450, cy = 250, radius = Math.min(200, Math.max(80, nodes.length * 12));
+          nodes.forEach((n, i) => {
+            const angle = (2 * Math.PI * i) / nodes.length;
+            positions[n.id] = { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+          });
+          setLmNodePositions(positions);
+        }
+        console.log("[SIGIL] Case recovered from backend:", data.metadata.case_name);
+      }
+    }).catch(() => {});
+  }, []);
+
   const [iocList, setIocList] = useState([]); // [{ value, type: "ip"|"domain" }]
   const [iocEnabled, setIocEnabled] = useState(true);
   const [showIocPanel, setShowIocPanel] = useState(false);
@@ -1304,29 +1450,33 @@ export default function SigilDFIR() {
   const fileInputRef = useRef(null);
 
   // Parse EVTX via backend API
-  // ── File Upload via Backend /parse ─────────────────────────────────
+  // ── File Upload via Backend /case/upload ─────────────────────────────
   const parseViaBackend = useCallback(async (file) => {
     setParsingFiles(prev => prev + 1);
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(`${backendUrl}/parse`, { method: "POST", body: formData });
+      const res = await fetch(`${backendUrl}/case/upload`, { method: "POST", body: formData });
       const data = await res.json();
       if (data.status === "success") {
         setArtifacts(prev => [...prev, {
           name: file.name,
           size: file.size,
           file,
-          content: "",  // Content lives on backend; not stored in browser
+          content: "",
           logType: data.log_type || "unknown",
           timestamp: Date.now(),
           parsedBackend: true,
           eventCount: data.event_count,
-          events: null,  // Events stay on backend; /analyze returns matched evidence only
+          events: null,
           webLogFormat: data.format || "Unknown",
-          hashes: data.hashes || null
+          hashes: data.hashes || null,
+          id: data.artifact?.id,
+          sha256: data.artifact?.sha256,
         }]);
         setBackendStatus("ok");
+      } else if (data.status === "duplicate") {
+        console.log(`[SIGIL] Skipped duplicate: ${file.name}`);
       } else {
         throw new Error(data.message || "Backend returned error");
       }
@@ -1391,6 +1541,207 @@ export default function SigilDFIR() {
     setArtifacts(prev => prev.filter((_, i) => i !== idx));
   }, []);
 
+  // ── Case Management Functions ──
+  const createCase = useCallback(async () => {
+    if (!newCaseName.trim() || !newCaseExaminer.trim() || !newCasePath.trim()) {
+      alert("Case Name, Examiner, and Save Location are required.");
+      return;
+    }
+    setCaseLoading(true);
+    try {
+      const res = await fetch(`${backendUrl}/case/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          case_name: newCaseName.trim(),
+          examiner: newCaseExaminer.trim(),
+          organization: newCaseOrg.trim(),
+          description: newCaseDesc.trim(),
+          save_path: newCasePath.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        setCaseMeta({
+          name: newCaseName.trim(), examiner: newCaseExaminer.trim(),
+          description: newCaseDesc.trim(), createdAt: data.metadata?.created_at,
+        });
+        setCaseDir(data.case_dir || "");
+        setCaseActive(true);
+        setArtifacts([]); setFindings([]); setOverallScore(null);
+        setBookmarkedEvents(new Set()); setLateralMovement(null); setLmPhase("config");
+      } else {
+        alert(`Failed to create case: ${data.message}`);
+      }
+    } catch (err) {
+      alert(`Error creating case: ${err.message}`);
+    }
+    setCaseLoading(false);
+  }, [backendUrl, newCaseName, newCaseExaminer, newCaseOrg, newCaseDesc, newCasePath]);
+
+  const openCaseFromDisk = useCallback(async () => {
+    setCaseLoading(true);
+    try {
+      const browseRes = await fetch(`${backendUrl}/case/browse-file`, { method: "POST" });
+      const browseData = await browseRes.json();
+      if (browseData.status !== "success") { setCaseLoading(false); return; }
+
+      const formData = new FormData();
+      const res = await fetch(`${backendUrl}/case/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `case_path=${encodeURIComponent(browseData.path)}`,
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        setCaseMeta({
+          name: data.metadata?.case_name || "", examiner: data.metadata?.examiner || "",
+          description: data.metadata?.description || "", createdAt: data.metadata?.created_at,
+        });
+        setCaseDir(data.case_dir || "");
+        setCaseActive(true);
+        // Restore artifacts
+        if (data.artifacts) {
+          setArtifacts(data.artifacts.map(a => ({
+            name: a.filename, logType: a.log_type, format: a.format,
+            eventCount: a.event_count, id: a.id, sha256: a.sha256,
+            hashes: { md5: a.md5, sha1: a.sha1, sha256: a.sha256, file_size: a.file_size },
+            parsed: true, backendParsed: true,
+          })));
+        }
+        // Restore findings
+        if (data.findings && data.findings.length > 0) {
+          setFindings(data.findings.map((f, idx) => ({
+            id: f.rule_id, dbId: f.id, uid: `${f.rule_id}_${f.id || idx}`, name: f.rule_name,
+            description: f.description, severity: f.severity,
+            mitre: f.mitre || [], matchCount: f.match_count,
+            keywordHits: f.keyword_hits, confidence: f.confidence,
+            nextSteps: f.next_steps || [], isIocRule: f.is_ioc_rule,
+            matchedEvents: (f.matched_events || []).map(e => ({
+              timestamp: e.timestamp, eventId: e.event_id, recordId: e.record_id,
+              content: e.content, message: e.message, fields: e.fields || {},
+              eventDataXml: e.event_data_xml || "", context: e.context || [],
+            })),
+          })));
+        }
+        if (data.overall_score) setOverallScore(data.overall_score);
+        if (data.bookmarks) setBookmarkedEvents(new Set(data.bookmarks));
+        if (data.lm_results) {
+          setLateralMovement({ loading: false, data: data.lm_results, error: null });
+          setLmPhase("results");
+          // Initialize node positions for restored LM graph
+          const nodes = data.lm_results?.graph?.nodes || [];
+          const positions = {};
+          const cx = 450, cy = 250, radius = Math.min(200, Math.max(80, nodes.length * 12));
+          nodes.forEach((n, i) => {
+            const angle = (2 * Math.PI * i) / nodes.length;
+            positions[n.id] = { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+          });
+          setLmNodePositions(positions);
+        }
+      } else {
+        alert(`Failed to open case: ${data.message}`);
+      }
+    } catch (err) {
+      alert(`Error opening case: ${err.message}`);
+    }
+    setCaseLoading(false);
+  }, [backendUrl]);
+
+  const closeCase = useCallback(async () => {
+    try {
+      await fetch(`${backendUrl}/case/close`, { method: "POST" });
+    } catch {}
+    setCaseActive(false); setCaseDir(""); setCaseMeta({ name: "", examiner: "", description: "", createdAt: null });
+    setArtifacts([]); setFindings([]); setOverallScore(null); setBookmarkedEvents(new Set());
+    setLateralMovement(null); setLmPhase("config"); setLmSelectedNode(null); setLmNodePositions({});
+    setProcessTree(null); setActiveTab("analyze"); setCaseScreen("gate");
+  }, [backendUrl]);
+
+  const browseCaseFolder = useCallback(async () => {
+    try {
+      const res = await fetch(`${backendUrl}/case/browse-folder`, { method: "POST" });
+      const data = await res.json();
+      if (data.status === "success") setNewCasePath(data.path);
+    } catch {}
+  }, [backendUrl]);
+
+  const runProcessTree = useCallback(async () => {
+    setProcessTree({ loading: true, data: null, error: null });
+    try {
+      const res = await fetch(`${backendUrl}/case/process-tree`, { method: "POST" });
+      const data = await res.json();
+      if (data.status === "success") {
+        setProcessTree({ loading: false, data, error: null });
+        // Auto-expand nodes with detections
+        const expanded = new Set();
+        (data.tree || []).forEach(n => {
+          if (n.has_detection) expanded.add(n.key);
+        });
+        setPtExpandedNodes(expanded);
+      } else if (data.status === "no_data") {
+        setProcessTree({ loading: false, data: { tree: [], findings: [], summary: { total_processes: 0, total_findings: 0, critical_count: 0, high_count: 0, medium_count: 0 } }, error: null });
+      } else {
+        setProcessTree({ loading: false, data: null, error: data.message || "Analysis failed" });
+      }
+    } catch (err) {
+      setProcessTree({ loading: false, data: null, error: err.message });
+    }
+  }, [backendUrl]);
+
+  const openLateralMovement = useCallback(() => {
+    const evtxArtifacts = artifacts.filter(a => a.logType === "windows_event_log" && a.file);
+    if (evtxArtifacts.length === 0) {
+      alert("No EVTX artifacts loaded.");
+      return;
+    }
+    setLmPhase("config");
+    setLmSelectedNode(null);
+    setLmNodePositions({});
+    setLateralMovement({ loading: false, data: null, error: null });
+  }, [artifacts]);
+
+  const runLateralMovement = useCallback(async () => {
+    setLateralMovement({ loading: true, data: null, error: null });
+    setLmPhase("results");
+    setLmTab("graph");
+    setLmSelectedNode(null);
+    try {
+      const res = await fetch(`${backendUrl}/case/lateral-movement`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_eids: [...lmSelectedEids] }),
+      });
+      const data = await res.json();
+
+      if (data.status === "success") {
+        const nodes = data.graph?.nodes || [];
+        const positions = {};
+        const cx = 450, cy = 250, radius = Math.min(200, Math.max(80, nodes.length * 12));
+        nodes.forEach((n, i) => {
+          const angle = (2 * Math.PI * i) / nodes.length;
+          positions[n.id] = { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) };
+        });
+        setLmNodePositions(positions);
+
+        setLateralMovement({
+          loading: false, error: null,
+          data: {
+            logons: data.logons || [],
+            graph: data.graph || { nodes: [], edges: [] },
+            chains: data.chains || [],
+            findings: data.findings || [],
+            summary: data.summary || {},
+          }
+        });
+      } else {
+        setLateralMovement({ loading: false, data: null, error: data.message || "Analysis failed" });
+      }
+    } catch (err) {
+      setLateralMovement({ loading: false, data: null, error: err.message });
+    }
+  }, [backendUrl, lmSelectedEids]);
+
   const generateReport = useCallback(async (mode = "all") => {
     try {
       let reportFindings = findings;
@@ -1400,7 +1751,7 @@ export default function SigilDFIR() {
         reportFindings = findings.map(f => {
           const bookmarkedEvts = (f.matchedEvents || []).filter(e => {
             const rid = e.recordId || e.record_id || "";
-            return bookmarkedEvents.has(`${f.id}:${rid}`);
+            return bookmarkedEvents.has(`${f.uid || f.id}:${rid}`);
           });
           if (bookmarkedEvts.length === 0) return null;
           return { ...f, matchedEvents: bookmarkedEvts, matchCount: bookmarkedEvts.length };
@@ -1454,7 +1805,7 @@ export default function SigilDFIR() {
         ioc_list: iocList,
       };
 
-      const res = await fetch(`${backendUrl}/report`, {
+      const res = await fetch(`${backendUrl}/case/report`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -1490,76 +1841,48 @@ export default function SigilDFIR() {
     let allFindings = [];
 
     try {
-      const results = await Promise.all(
-        artifacts.filter(a => a.logType && a.logType !== "unknown").map(async (artifact) => {
-          try {
-            if (!artifact.file) return null;
-            const formData = new FormData();
-            formData.append("file", artifact.file);
-            if (iocPayload) formData.append("ioc_list", iocPayload);
-            formData.append("ioc_enabled", String(iocEnabled));
-            const res = await fetch(`${backendUrl}/analyze`, { method: "POST", body: formData });
-            const data = await res.json();
-            if (data.status === "success" && data.findings) {
-              return data.findings.map(f => ({
-                id: f.id,
-                name: f.name,
-                description: f.description,
-                severity: f.severity,
-                mitre: f.mitre || [],
-                matchCount: f.match_count,
-                keywordHits: f.keyword_hits,
-                confidence: f.confidence,
-                excerpts: f.excerpts || [],
-                matchedEvents: (f.matched_events || []).map(e => ({
-                  timestamp: e.timestamp,
-                  eventId: e.event_id,
-                  recordId: e.record_id,
-                  content: e.content,
-                  message: e.message,
-                  structuredFields: e.fields,
-                  line_index: e.line_index,
-                  context: e.context || [],
-                  eventDataXml: e.event_data_xml || ""
-                })),
-                nextSteps: f.next_steps || [],
-                isIocRule: f.is_ioc_rule || false,
-                source: artifact.name,
-                logType: artifact.logType
-              }));
-            }
-          } catch (err) {
-            console.warn("Backend analyze failed for", artifact.name, err);
-          }
-          return null;
-        })
-      );
+      const formData = new FormData();
+      if (iocPayload) formData.append("ioc_list", iocPayload);
+      formData.append("ioc_enabled", String(iocEnabled));
+      const res = await fetch(`${backendUrl}/case/analyze`, { method: "POST", body: formData });
+      const data = await res.json();
 
-      for (const result of results) {
-        if (result) allFindings.push(...result);
+      if (data.status === "success" && data.findings) {
+        allFindings = data.findings.map((f, idx) => ({
+          id: f.rule_id || f.id,
+          dbId: f.id,
+          uid: `${f.rule_id || f.id}_${f.id || idx}`,
+          name: f.rule_name || f.name,
+          description: f.description,
+          severity: f.severity,
+          mitre: f.mitre || [],
+          matchCount: f.match_count,
+          keywordHits: f.keyword_hits,
+          confidence: f.confidence,
+          excerpts: [],
+          matchedEvents: (f.matched_events || []).map(e => ({
+            timestamp: e.timestamp,
+            eventId: e.event_id,
+            recordId: e.record_id || String(e.id),
+            content: e.content,
+            message: e.message,
+            structuredFields: e.fields,
+            line_index: e.line_index,
+            context: e.context || [],
+            eventDataXml: e.event_data_xml || ""
+          })),
+          nextSteps: f.next_steps || [],
+          isIocRule: f.is_ioc_rule || false,
+        }));
+        if (data.overall_score) setOverallScore(data.overall_score);
       }
     } catch (err) {
       console.error("Analysis failed:", err);
     }
 
-    // Deduplicate by rule ID, merge matchedEvents
-    const deduped = {};
-    for (const f of allFindings) {
-      const key = f.id;
-      if (!deduped[key] || f.confidence > deduped[key].confidence) {
-        if (deduped[key] && deduped[key].matchedEvents) {
-          f.matchedEvents = [...(f.matchedEvents || []), ...deduped[key].matchedEvents];
-        }
-        deduped[key] = f;
-      } else if (deduped[key]) {
-        deduped[key].matchedEvents = [...(deduped[key].matchedEvents || []), ...(f.matchedEvents || [])];
-      }
-    }
-    const final = Object.values(deduped).sort((a, b) => severityWeight(b.severity) - severityWeight(a.severity) || b.confidence - a.confidence);
-    setFindings(final);
-    setOverallScore(computeOverallScore(final));
+    setFindings(allFindings);
     setScanning(false);
-    if (final.length > 0) setExpandedFindings(new Set([final[0].id]));
+    if (allFindings.length > 0) setExpandedFindings(new Set([allFindings[0].uid || allFindings[0].id]));
   }, [artifacts, iocEnabled, iocList, backendUrl]);
 
   const toggleFinding = (id) => {
@@ -1642,7 +1965,7 @@ export default function SigilDFIR() {
     md += `**Date:** ${new Date().toISOString()}\n\n`;
     md += `**Overall Assessment:** ${overallScore?.label || "N/A"} (Score: ${overallScore?.score || 0})\n\n`;
     md += `## Artifacts Analyzed\n\n`;
-    artifacts.forEach(a => { md += `- **${a.name}** — ${logTypeLabel(a.logType)} (${(a.size/1024).toFixed(1)} KB)\n`; });
+    artifacts.forEach(a => { md += `- **${a.name}** — ${logTypeLabel(a.logType)} (${((a.size || a.hashes?.file_size || 0)/1024).toFixed(1)} KB)\n`; });
     md += `\n## Findings (${findings.length})\n\n`;
     findings.forEach(f => {
       md += `### [${f.severity.toUpperCase()}] ${f.name} (${f.id})\n\n`;
@@ -1950,7 +2273,7 @@ export default function SigilDFIR() {
         if (data.artifacts) setArtifacts(data.artifacts);
         if (data.findings) {
           setFindings(data.findings);
-          if (data.findings.length > 0) setExpandedFindings(new Set([data.findings[0].id]));
+          if (data.findings.length > 0) setExpandedFindings(new Set([data.findings[0].uid || data.findings[0].id]));
         }
         if (data.overallScore) setOverallScore(data.overallScore);
         if (data.iocList) setIocList(data.iocList);
@@ -2269,7 +2592,7 @@ export default function SigilDFIR() {
             <div>Confidence: <span>{finding.confidence}%</span></div>
             {filtered.length !== events.length && <div>Showing: <span>{filtered.length}</span> filtered</div>}
             {finding._timelineClick && (() => {
-              const fullFinding = findings.find(f => f.id === finding.id);
+              const fullFinding = findings.find(f => (f.uid || f.id) === (finding.uid || finding.id));
               const totalCount = fullFinding ? (fullFinding.matchedEvents || []).length : 0;
               return totalCount > 1 ? (
                 <button
@@ -2328,13 +2651,13 @@ export default function SigilDFIR() {
                     const contentText = ev.content || ev.message || "";
                     const fields = ev.structuredFields || ev.fields || null;
                     const isWeb = finding.logType === "web_server_log";
-                    const evBookmarkKey = `${finding.id}:${rid}`;
+                    const evBookmarkKey = `${finding.uid || finding.id}:${rid}`;
                     const isBookmarked = bookmarkedEvents.has(evBookmarkKey);
 
                     return (
                       <tr key={idx} className={`severity-row-${finding.severity}`} style={isBookmarked ? { background: "rgba(245, 158, 11, 0.08)" } : {}}>
                         <td style={{ textAlign: "center", cursor: "pointer", fontSize: 16 }}
-                          onClick={() => toggleEventBookmark(finding.id, rid)}
+                          onClick={() => toggleEventBookmark(finding.uid || finding.id, rid)}
                           title={isBookmarked ? "Remove bookmark" : "Bookmark this event for report"}>
                           <span style={{ color: isBookmarked ? "var(--accent-orange)" : "var(--text-muted)", opacity: isBookmarked ? 1 : 0.3 }}>
                             {isBookmarked ? "★" : "☆"}
@@ -2397,7 +2720,7 @@ export default function SigilDFIR() {
                                 <div>
                                   {ev.eventDataXml ? (
                                     <div>
-                                      <span style={{ fontSize: 9, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>EVENT DATA (XML):</span>
+                                      <span style={{ fontSize: 9, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>EVENT XML:</span>
                                       <pre style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", background: "var(--bg-primary)", padding: 8, borderRadius: 4, marginTop: 4, whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 500, overflowY: "auto", border: "1px solid var(--border-primary)" }}>
                                         {ev.eventDataXml}
                                       </pre>
@@ -2417,7 +2740,7 @@ export default function SigilDFIR() {
                                 </div>
                               )}
                               <button className="evidence-expand-btn" onClick={() => toggleRow(idx)}>
-                                {isExpanded ? "▲ Collapse" : `▼ Show more${ev.eventDataXml ? " (Event Data XML)" : ""}${ev.context?.length ? ` (+${ev.context.length} context)` : ""}`}
+                                {isExpanded ? "▲ Collapse" : `▼ Show more${ev.eventDataXml ? " (Event XML)" : ""}${ev.context?.length ? ` (+${ev.context.length} context)` : ""}`}
                               </button>
                               {isExpanded && !ev.eventDataXml && ev.context && ev.context.length > 0 && (
                                 <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px dashed var(--border-primary)" }}>
@@ -2498,6 +2821,99 @@ export default function SigilDFIR() {
   return (
     <div>
       <style>{STYLES}</style>
+
+      {/* ═══ CASE GATE — shown when no case is active ═══ */}
+      {!caseActive && (
+        <div className="app-container" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+          <div style={{ maxWidth: 520, width: "100%", padding: 32 }}>
+            {/* Logo */}
+            <div style={{ textAlign: "center", marginBottom: 32 }}>
+              <div className="logo-mark" style={{ margin: "0 auto 12px", width: 56, height: 56, borderRadius: 14, display: "flex", alignItems: "center", justifyContent: "center" }}><Icons.Shield /></div>
+              <h1 style={{ fontSize: 28, fontFamily: "var(--font-display)", margin: 0 }}>SIGIL</h1>
+              <p style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", marginTop: 4 }}>DFIR Compromise Assessment Tool</p>
+            </div>
+
+            {caseScreen === "gate" && (
+              <div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <button className="btn btn-primary" onClick={() => setCaseScreen("create")}
+                    style={{ padding: "14px 24px", fontSize: 14, width: "100%" }}>
+                    + New Case
+                  </button>
+                  <button className="btn btn-secondary" onClick={openCaseFromDisk}
+                    disabled={caseLoading}
+                    style={{ padding: "14px 24px", fontSize: 14, width: "100%" }}>
+                    {caseLoading ? "Opening..." : "Open Existing Case"}
+                  </button>
+                </div>
+                <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 11, marginTop: 20, lineHeight: 1.6 }}>
+                  Create a new case or open an existing .sigil case file.<br />
+                  All evidence, findings, and bookmarks are saved to the case folder.
+                </p>
+              </div>
+            )}
+
+            {caseScreen === "create" && (
+              <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-primary)", borderRadius: 8, padding: 24 }}>
+                <h3 style={{ margin: "0 0 16px", fontSize: 15 }}>Create New Case</h3>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div>
+                    <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4, fontFamily: "var(--font-mono)" }}>Case Name *</label>
+                    <input type="text" value={newCaseName} onChange={e => setNewCaseName(e.target.value)}
+                      placeholder="e.g. Incident Response - Server Compromise"
+                      style={{ width: "100%", padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4, fontFamily: "var(--font-mono)" }}>Examiner *</label>
+                    <input type="text" value={newCaseExaminer} onChange={e => setNewCaseExaminer(e.target.value)}
+                      placeholder="e.g. Rodel"
+                      style={{ width: "100%", padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4, fontFamily: "var(--font-mono)" }}>Organization</label>
+                    <input type="text" value={newCaseOrg} onChange={e => setNewCaseOrg(e.target.value)}
+                      placeholder="e.g. OWWA"
+                      style={{ width: "100%", padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 13 }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4, fontFamily: "var(--font-mono)" }}>Description</label>
+                    <textarea value={newCaseDesc} onChange={e => setNewCaseDesc(e.target.value)}
+                      placeholder="Brief case description..."
+                      rows={2}
+                      style={{ width: "100%", padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 13, resize: "vertical" }} />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4, fontFamily: "var(--font-mono)" }}>Save Location *</label>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <input type="text" value={newCasePath} onChange={e => setNewCasePath(e.target.value)}
+                        placeholder="Select folder..."
+                        style={{ flex: 1, padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 13 }} />
+                      <button className="btn btn-secondary" onClick={browseCaseFolder} style={{ whiteSpace: "nowrap" }}>Browse</button>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button className="btn btn-secondary" onClick={() => setCaseScreen("gate")} style={{ flex: 1 }}>Cancel</button>
+                    <button className="btn btn-primary" onClick={createCase} disabled={caseLoading}
+                      style={{ flex: 2 }}>
+                      {caseLoading ? "Creating..." : "Create Case"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Backend Status */}
+            <div style={{ textAlign: "center", marginTop: 24 }}>
+              <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                Backend: {backendUrl}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ MAIN APP — shown when case is active ═══ */}
+      {caseActive && (
       <div className="app-container">
         {/* Header */}
         <header className="header">
@@ -2509,18 +2925,11 @@ export default function SigilDFIR() {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
-            <span className="version-badge">v1.0.0 — Open Source</span>
+            <span className="version-badge">v2.0.0 — Open Source</span>
             {/* Case management buttons */}
-            <button className="btn btn-secondary case-btn" onClick={() => { setCaseModalMode("create"); setShowCaseModal(true); }}>
-              + New Case
+            <button className="btn btn-secondary case-btn" onClick={closeCase} style={{ fontSize: 11 }}>
+              Close Case
             </button>
-            <button className="btn btn-secondary case-btn" onClick={saveCase} disabled={!hasActiveCase && artifacts.length === 0 && findings.length === 0}>
-              <Icons.Download /> Save
-            </button>
-            <label className="btn btn-secondary case-btn" style={{ cursor: "pointer", marginBottom: 0 }}>
-              <Icons.Upload /> Open Case
-              <input ref={caseImportRef} type="file" accept=".json" style={{ display: "none" }} onChange={importCase} />
-            </label>
             <button className="backend-config-toggle" onClick={() => { setShowBackendConfig(!showBackendConfig); if (!showBackendConfig) checkBackend(); }}>
               <span className={`backend-dot ${backendStatus === "ok" ? "ok" : backendStatus === "error" ? "error" : "unknown"}`} />
               Backend
@@ -2550,21 +2959,14 @@ export default function SigilDFIR() {
         </header>
 
         {/* Case Banner */}
-        {hasActiveCase && (
-          <div className="case-banner">
-            <div className="case-banner-left">
-              <Icons.Clipboard />
-              <span className="case-name">{caseMeta.name}</span>
-              {caseMeta.examiner && <span className="case-meta-item">Examiner: {caseMeta.examiner}</span>}
-              {caseMeta.createdAt && <span className="case-meta-item">Created: {caseMeta.createdAt.slice(0, 10)}</span>}
-            </div>
-            <div className="case-actions">
-              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => { setCaseModalMode("create"); setShowCaseModal(true); }}>
-                Edit
-              </button>
-            </div>
+        <div className="case-banner">
+          <div className="case-banner-left">
+            <Icons.Clipboard />
+            <span className="case-name">{caseMeta.name}</span>
+            {caseMeta.examiner && <span className="case-meta-item">Examiner: {caseMeta.examiner}</span>}
+            {caseDir && <span className="case-meta-item" style={{ fontSize: 9, opacity: 0.6 }}>{caseDir}</span>}
           </div>
-        )}
+        </div>
 
         {/* Case Create/Edit Modal */}
         {showCaseModal && (
@@ -2604,6 +3006,12 @@ export default function SigilDFIR() {
         {/* Tabs */}
         <div className="tab-bar">
           <button className={`tab-btn ${activeTab === "analyze" ? "active" : ""}`} onClick={() => setActiveTab("analyze")}>Analyze</button>
+          <button className={`tab-btn ${activeTab === "lateral" ? "active" : ""}`} onClick={() => { setActiveTab("lateral"); if (!lateralMovement?.data) openLateralMovement(); }}>
+            Lateral Movement
+          </button>
+          <button className={`tab-btn ${activeTab === "proctree" ? "active" : ""}`} onClick={() => { setActiveTab("proctree"); if (!processTree?.data) runProcessTree(); }}>
+            Process Inspector
+          </button>
           <button className={`tab-btn ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}>
             Timeline {findings.length > 0 ? `(${totalTimelineEvents()})` : ""}
           </button>
@@ -2701,6 +3109,511 @@ export default function SigilDFIR() {
         <RuleEditorModal />
         {/* Evidence Viewer Modal */}
         <EvidenceViewerModal />
+
+        {/* Lateral Movement Tab */}
+        {activeTab === "lateral" && (
+          <div>
+            {/* Config Phase — EventID Selector */}
+            {lmPhase === "config" && (
+              <div style={{ maxWidth: 950, margin: "0 auto", padding: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                  <div>
+                    <h2 style={{ margin: 0, fontSize: 18 }}><Icons.Target /> Lateral Movement Tracker</h2>
+                    <p style={{ margin: "4px 0 0", fontSize: 11, color: "var(--text-muted)" }}>
+                      Select which Event IDs to search across your EVTX artifacts. Real detection comes from correlating patterns across multiple event types.
+                    </p>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ fontSize: 22, fontWeight: 700, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)" }}>{lmSelectedEids.size}</div>
+                    <div style={{ fontSize: 9, color: "var(--text-muted)", textTransform: "uppercase" }}>Event IDs Selected</div>
+                  </div>
+                </div>
+
+                {/* EventID Category Grid */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+                  {LM_EVENT_CATEGORIES.map(cat => {
+                    const allSelected = cat.eids.every(e => lmSelectedEids.has(e.id));
+                    const someSelected = cat.eids.some(e => lmSelectedEids.has(e.id));
+                    return (
+                      <div key={cat.name} style={{ background: "var(--bg-card)", border: "1px solid var(--border-primary)", borderRadius: 8, overflow: "hidden" }}>
+                        <div style={{ padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid var(--border-primary)", background: someSelected ? "rgba(56,189,248,0.04)" : "transparent" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 16 }}>{cat.icon}</span>
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-primary)" }}>{cat.name}</div>
+                              <div style={{ fontSize: 9, color: "var(--text-muted)" }}>{cat.desc}</div>
+                            </div>
+                          </div>
+                          <button onClick={() => {
+                            setLmSelectedEids(prev => {
+                              const next = new Set(prev);
+                              if (allSelected) { cat.eids.forEach(e => next.delete(e.id)); }
+                              else { cat.eids.forEach(e => next.add(e.id)); }
+                              return next;
+                            });
+                          }} style={{ fontSize: 9, padding: "3px 8px", background: allSelected ? "rgba(56,189,248,0.15)" : "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 4, color: allSelected ? "var(--accent-cyan)" : "var(--text-muted)", cursor: "pointer", fontFamily: "var(--font-mono)" }}>
+                            {allSelected ? "Deselect All" : "Select All"}
+                          </button>
+                        </div>
+                        <div style={{ padding: "6px 10px" }}>
+                          {cat.eids.map(eid => {
+                            const isOn = lmSelectedEids.has(eid.id);
+                            const sevColors = { critical: "var(--severity-critical)", high: "var(--severity-high)", medium: "var(--severity-medium)", low: "var(--severity-low)" };
+                            return (
+                              <label key={eid.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 4px", cursor: "pointer", borderRadius: 4, background: isOn ? "rgba(56,189,248,0.04)" : "transparent" }}
+                                onClick={() => setLmSelectedEids(prev => { const next = new Set(prev); isOn ? next.delete(eid.id) : next.add(eid.id); return next; })}>
+                                <span style={{ width: 16, height: 16, borderRadius: 3, border: isOn ? "2px solid var(--accent-cyan)" : "2px solid var(--border-primary)", background: isOn ? "var(--accent-cyan)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "var(--bg-primary)", flexShrink: 0, transition: "all 0.15s" }}>
+                                  {isOn ? "✓" : ""}
+                                </span>
+                                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 600, color: sevColors[eid.sev] || "var(--text-primary)", minWidth: 38 }}>{eid.id}</span>
+                                <span style={{ fontSize: 11, color: "var(--text-secondary)", flex: 1 }}>{eid.label}</span>
+                                <span style={{ fontSize: 9, color: "var(--text-muted)", fontStyle: "italic" }}>{eid.hint}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Technique Mapping Table */}
+                <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-primary)", borderRadius: 8, padding: 16, marginBottom: 20 }}>
+                  <h4 style={{ margin: "0 0 10px", fontSize: 12, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)" }}>Lateral Movement Technique → Event ID Mapping</h4>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, fontSize: 11 }}>
+                    {[
+                      { tech: "PsExec", eids: "4624, 4648, 7045, 4688" },
+                      { tech: "WMI", eids: "4624, 4688, 5861" },
+                      { tech: "RDP", eids: "4624 (Type 10), 4778, 1149" },
+                      { tech: "SMB / Admin Shares", eids: "4624 (Type 3), 5140, 5145" },
+                      { tech: "Pass-the-Hash", eids: "4624, 4648, 4776" },
+                      { tech: "Kerberoasting", eids: "4768, 4769" },
+                    ].map(t => (
+                      <div key={t.tech} style={{ padding: "6px 10px", background: "var(--bg-primary)", borderRadius: 4, border: "1px solid var(--border-primary)" }}>
+                        <div style={{ fontWeight: 600, color: "var(--text-primary)", fontSize: 11 }}>{t.tech}</div>
+                        <div style={{ fontFamily: "var(--font-mono)", color: "var(--accent-cyan)", fontSize: 10, marginTop: 2 }}>{t.eids}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Action Bar */}
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    {artifacts.filter(a => a.logType === "windows_event_log").length} EVTX file(s) will be analyzed · {lmSelectedEids.size} Event IDs selected
+                  </span>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="btn btn-secondary" onClick={() => {
+                      const all = new Set();
+                      LM_EVENT_CATEGORIES.forEach(c => c.eids.forEach(e => all.add(e.id)));
+                      setLmSelectedEids(all);
+                    }} style={{ fontSize: 11 }}>Select All</button>
+                    <button className="btn btn-secondary" onClick={() => setLmSelectedEids(new Set())} style={{ fontSize: 11 }}>Clear All</button>
+                    <button className="btn btn-primary" onClick={runLateralMovement}
+                      disabled={lmSelectedEids.size === 0 || artifacts.filter(a => a.logType === "windows_event_log").length === 0}
+                      style={{ padding: "10px 28px", fontSize: 13 }}>
+                      Analyze ({lmSelectedEids.size} Event IDs)
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Loading Phase */}
+            {lateralMovement?.loading && (
+              <div style={{ padding: 80, textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <div className="parsing-spinner" />
+                <p style={{ marginTop: 16, color: "var(--text-muted)", fontSize: 13 }}>Analyzing {lmSelectedEids.size} Event IDs across {artifacts.filter(a => a.logType === "windows_event_log").length} EVTX files...</p>
+              </div>
+            )}
+
+            {lateralMovement?.error && (
+              <div style={{ padding: 40, textAlign: "center" }}>
+                <p style={{ color: "var(--accent-red)" }}>Error: {lateralMovement.error}</p>
+                <button className="btn btn-secondary" onClick={() => setLmPhase("config")} style={{ marginTop: 12 }}>← Back to Config</button>
+              </div>
+            )}
+
+            {/* Results Phase */}
+            {lmPhase === "results" && lateralMovement?.data && (() => {
+              const { data } = lateralMovement;
+              const { summary, graph, logons, chains, findings: lmFindings } = data;
+
+              if (summary.total_logons === 0) return (
+                <div style={{ padding: 60, textAlign: "center" }}>
+                  <p style={{ color: "var(--text-muted)", fontSize: 14 }}>No lateral movement events found matching the selected Event IDs.</p>
+                  <button className="btn btn-secondary" onClick={() => setLmPhase("config")} style={{ marginTop: 12 }}>← Back to Config</button>
+                </div>
+              );
+
+              return (
+                <div>
+                  {/* Summary Bar */}
+                  <div style={{ display: "flex", gap: 14, padding: "14px 20px", borderBottom: "1px solid var(--border-primary)", flexWrap: "wrap", alignItems: "center" }}>
+                    {[
+                      { label: "Logons", value: summary.total_logons, color: "var(--accent-cyan)" },
+                      { label: "Sources", value: summary.unique_sources, color: "var(--accent-blue)" },
+                      { label: "Targets", value: summary.unique_targets, color: "var(--accent-green)" },
+                      { label: "RDP", value: summary.rdp_logons, color: "var(--accent-red)" },
+                      { label: "Failed", value: summary.failed_logons, color: "var(--accent-orange)" },
+                      { label: "Chains", value: summary.chain_count, color: "var(--accent-purple)" },
+                      { label: "Findings", value: (lmFindings || []).length, color: "var(--severity-critical)" },
+                    ].map(s => (
+                      <div key={s.label} style={{ textAlign: "center", minWidth: 60 }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: s.color, fontFamily: "var(--font-mono)" }}>{s.value}</div>
+                        <div style={{ fontSize: 8, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 1 }}>{s.label}</div>
+                      </div>
+                    ))}
+                    <button className="btn btn-secondary" onClick={() => setLmPhase("config")} style={{ marginLeft: "auto", fontSize: 10 }}>← Reconfigure</button>
+                  </div>
+
+                  {/* Sub-tabs */}
+                  <div style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--border-primary)" }}>
+                    {[
+                      { id: "graph", label: "Network Graph" },
+                      { id: "timeline", label: `Timeline (${logons.length})` },
+                      { id: "chains", label: `Chains (${chains.length})` },
+                      { id: "findings", label: `Findings (${(lmFindings || []).length})` },
+                    ].map(tab => (
+                      <button key={tab.id} onClick={() => setLmTab(tab.id)}
+                        style={{ padding: "10px 18px", background: "transparent", border: "none",
+                          borderBottom: lmTab === tab.id ? "2px solid var(--accent-cyan)" : "2px solid transparent",
+                          color: lmTab === tab.id ? "var(--accent-cyan)" : "var(--text-muted)",
+                          cursor: "pointer", fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div style={{ padding: 16 }}>
+                    {/* Network Graph */}
+                    {lmTab === "graph" && (
+                      <div>
+                        <div style={{ background: "var(--bg-primary)", borderRadius: 8, border: "1px solid var(--border-primary)", minHeight: 450 }}>
+                          <svg ref={lmSvgRef} viewBox="0 0 900 500" style={{ width: "100%", height: "auto", cursor: "default" }}
+                            onMouseMove={(e) => {
+                              if (!lmDragRef.current) return;
+                              try {
+                                const svg = lmSvgRef.current;
+                                if (!svg) return;
+                                const ctm = svg.getScreenCTM();
+                                if (!ctm) return;
+                                const pt = svg.createSVGPoint();
+                                pt.x = e.clientX; pt.y = e.clientY;
+                                const svgP = pt.matrixTransform(ctm.inverse());
+                                setLmNodePositions(prev => ({ ...prev, [lmDragRef.current?.nodeId]: { x: svgP.x, y: svgP.y } }));
+                              } catch (err) { /* ignore drag errors */ }
+                            }}
+                            onMouseUp={() => { lmDragRef.current = null; }}
+                            onMouseLeave={() => { lmDragRef.current = null; }}>
+                            <defs>
+                              <marker id="lm-arrow" markerWidth="8" markerHeight="6" refX="24" refY="3" orient="auto">
+                                <polygon points="0 0, 8 3, 0 6" fill="var(--text-muted)" opacity="0.6" />
+                              </marker>
+                            </defs>
+                            {graph.edges.map((edge, i) => {
+                              const sp = lmNodePositions[edge.source], tp = lmNodePositions[edge.target];
+                              if (!sp || !tp) return null;
+                              const isHL = lmSelectedNode && (edge.source === lmSelectedNode || edge.target === lmSelectedNode);
+                              const isDim = lmSelectedNode && !isHL;
+                              return (
+                                <g key={i}>
+                                  <line x1={sp.x} y1={sp.y} x2={tp.x} y2={tp.y}
+                                    stroke={isHL ? "#38bdf8" : edge.color || "#6b7280"}
+                                    strokeWidth={isHL ? 3 : Math.min(Math.max(edge.count * 0.5, 1), 4)}
+                                    opacity={isDim ? 0.08 : isHL ? 1 : 0.5} markerEnd="url(#lm-arrow)" />
+                                  {!isDim && <text x={(sp.x + tp.x) / 2} y={(sp.y + tp.y) / 2 - 6} textAnchor="middle" fill={isHL ? "#38bdf8" : "var(--text-muted)"} fontSize={8} fontFamily="monospace">{edge.count}×</text>}
+                                </g>
+                              );
+                            })}
+                            {graph.nodes.map((node) => {
+                              const pos = lmNodePositions[node.id];
+                              if (!pos) return null;
+                              const isSel = lmSelectedNode === node.id;
+                              const isConn = lmSelectedNode && graph.edges.some(e => (e.source === lmSelectedNode && e.target === node.id) || (e.target === lmSelectedNode && e.source === node.id));
+                              const isDim = lmSelectedNode && !isSel && !isConn;
+                              const isIp = node.type === "ip";
+                              const fillColor = isSel ? "#38bdf8" : node.role === "source" ? "#3b82f6" : node.role === "target" ? "#10b981" : "#f59e0b";
+                              return (
+                                <g key={node.id} style={{ cursor: "grab" }} opacity={isDim ? 0.12 : 1}
+                                  onMouseDown={(e) => { e.preventDefault(); lmDragRef.current = { nodeId: node.id }; }}
+                                  onClick={(e) => { e.stopPropagation(); setLmSelectedNode(prev => prev === node.id ? null : node.id); }}>
+                                  {isIp ? (
+                                    <circle cx={pos.x} cy={pos.y} r={isSel ? 24 : 20} fill={fillColor} fillOpacity={0.15} stroke={fillColor} strokeWidth={isSel ? 3 : 2} strokeDasharray={isSel ? "none" : "4,2"} />
+                                  ) : (
+                                    <rect x={pos.x - (isSel ? 28 : 24)} y={pos.y - (isSel ? 18 : 16)} width={isSel ? 56 : 48} height={isSel ? 36 : 32} rx={6} fill={fillColor} fillOpacity={0.15} stroke={fillColor} strokeWidth={isSel ? 3 : 2} />
+                                  )}
+                                  {isSel && <circle cx={pos.x} cy={pos.y} r={32} fill="none" stroke="#38bdf8" strokeWidth={1} opacity={0.3} />}
+                                  <text x={pos.x} y={pos.y + 4} textAnchor="middle" fill={isDim ? "var(--text-muted)" : "var(--text-primary)"} fontSize={9} fontFamily="monospace" fontWeight={isSel ? "700" : "600"} style={{ pointerEvents: "none" }}>
+                                    {node.id.length > 16 ? node.id.slice(0, 15) + "\u2026" : node.id}
+                                  </text>
+                                </g>
+                              );
+                            })}
+                          </svg>
+                        </div>
+                        <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", flexWrap: "wrap" }}>
+                          <span><span style={{ color: "#3b82f6" }}>{"\u25CF"}</span> Source</span>
+                          <span><span style={{ color: "#10b981" }}>{"\u25CF"}</span> Target</span>
+                          <span><span style={{ color: "#f59e0b" }}>{"\u25CF"}</span> Both</span>
+                          <span style={{ marginLeft: "auto" }}>Click node to highlight {"\u00B7"} Drag to move</span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Timeline */}
+                    {lmTab === "timeline" && (
+                      <div style={{ overflowX: "auto" }}>
+                        <table className="evidence-table">
+                          <thead><tr>
+                            <th style={{ width: 155 }}>Timestamp</th><th style={{ width: 45 }}>EID</th>
+                            <th style={{ width: 130 }}>Source</th><th style={{ width: 15 }}>{"\u2192"}</th>
+                            <th style={{ width: 130 }}>Target</th><th style={{ width: 110 }}>User</th>
+                            <th style={{ width: 55 }}>Status</th><th>Logon Type</th>
+                          </tr></thead>
+                          <tbody>
+                            {logons.slice(0, 500).map((l, i) => (
+                              <tr key={i} style={{ background: l.status === "Failed" ? "rgba(239,68,68,0.06)" : "transparent" }}>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10 }}>{(l.timestamp || "").slice(0, 19)}</td>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent-cyan)" }}>{l.event_id}</td>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent-blue)" }}>{l.source}</td>
+                                <td style={{ textAlign: "center", color: "var(--text-muted)" }}>{"\u2192"}</td>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--accent-green)" }}>{l.target}</td>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10 }}>{l.target_user}</td>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: l.status === "Failed" ? "var(--accent-red)" : "var(--accent-green)", fontWeight: 600 }}>{l.status}</td>
+                                <td style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: l.logon_type_color }}>{l.logon_type_label}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        {logons.length > 500 && <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 11, marginTop: 8 }}>Showing 500 of {logons.length} events</p>}
+                      </div>
+                    )}
+
+                    {/* Chains */}
+                    {lmTab === "chains" && (
+                      <div>
+                        {chains.length === 0 ? (
+                          <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>No multi-hop lateral movement chains detected.</div>
+                        ) : chains.map((chain, ci) => (
+                          <div key={ci} style={{ background: "var(--bg-card)", border: "1px solid var(--border-primary)", borderRadius: 8, padding: 16, marginBottom: 12 }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-cyan)", marginBottom: 8, fontFamily: "var(--font-mono)" }}>Chain #{ci + 1} {"\u2014"} {chain.length} hops</div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                              {chain.map((hop, hi) => (
+                                <Fragment key={hi}>
+                                  {hi === 0 && <span style={{ padding: "4px 10px", background: "rgba(59,130,246,0.15)", border: "1px solid var(--accent-blue)", borderRadius: 6, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--accent-blue)" }}>{hop.source}</span>}
+                                  <span style={{ color: "var(--text-muted)", fontSize: 16 }}>{"\u2192"}</span>
+                                  <div style={{ textAlign: "center" }}>
+                                    <span style={{ padding: "4px 10px", background: "rgba(16,185,129,0.15)", border: "1px solid var(--accent-green)", borderRadius: 6, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--accent-green)", display: "inline-block" }}>{hop.target}</span>
+                                    <div style={{ fontSize: 8, color: "var(--text-muted)", fontFamily: "var(--font-mono)", marginTop: 2 }}>{hop.target_user} {"\u00B7"} {hop.logon_type_label}</div>
+                                  </div>
+                                </Fragment>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Findings */}
+                    {lmTab === "findings" && (
+                      <div>
+                        {(!lmFindings || lmFindings.length === 0) ? (
+                          <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>No suspicious patterns detected.</div>
+                        ) : lmFindings.map((f, fi) => {
+                          const sevColors = { critical: "var(--severity-critical)", high: "var(--severity-high)", medium: "var(--severity-medium)", low: "var(--severity-low)" };
+                          return (
+                            <div key={fi} style={{ background: "var(--bg-card)", border: "1px solid var(--border-primary)", borderRadius: 8, padding: 16, marginBottom: 10, borderLeft: `3px solid ${sevColors[f.severity] || "var(--text-muted)"}` }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                                <span style={{ fontSize: 10, fontWeight: 700, color: sevColors[f.severity], textTransform: "uppercase", fontFamily: "var(--font-mono)", padding: "2px 8px", background: `${sevColors[f.severity]}22`, borderRadius: 4 }}>{f.severity}</span>
+                                {f.mitre && <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--accent-cyan)", padding: "2px 6px", background: "rgba(56,189,248,0.1)", borderRadius: 4 }}>{f.mitre}</span>}
+                                <span style={{ fontSize: 12, fontWeight: 600 }}>{f.title}</span>
+                              </div>
+                              <p style={{ fontSize: 11, color: "var(--text-secondary)", margin: 0, fontFamily: "var(--font-mono)", lineHeight: 1.5 }}>{f.desc}</p>
+                              {f.source && (
+                                <button onClick={() => { setLmSelectedNode(f.source); setLmTab("graph"); }}
+                                  style={{ marginTop: 8, fontSize: 10, color: "var(--accent-cyan)", background: "none", border: "1px solid var(--accent-cyan)", borderRadius: 4, padding: "3px 10px", cursor: "pointer", fontFamily: "var(--font-mono)" }}>
+                                  View in Graph
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* Process Inspector Tab */}
+        {activeTab === "proctree" && (
+          <div>
+            {processTree?.loading && (
+              <div style={{ padding: 80, textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center" }}>
+                <div className="parsing-spinner" />
+                <p style={{ marginTop: 16, color: "var(--text-muted)", fontSize: 13 }}>Building process tree from Sysmon EID 1 and Security EID 4688...</p>
+              </div>
+            )}
+
+            {processTree?.error && (
+              <div style={{ padding: 40, textAlign: "center" }}>
+                <p style={{ color: "var(--accent-red)" }}>Error: {processTree.error}</p>
+                <button className="btn btn-secondary" onClick={runProcessTree} style={{ marginTop: 12 }}>Retry</button>
+              </div>
+            )}
+
+            {processTree?.data && (() => {
+              const { tree, findings: ptFindings, summary } = processTree.data;
+
+              if (summary.total_processes === 0) return (
+                <div style={{ padding: 60, textAlign: "center" }}>
+                  <p style={{ color: "var(--text-muted)", fontSize: 14 }}>No process creation events found (Sysmon EID 1 or Security EID 4688).</p>
+                  <p style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 8 }}>Upload EVTX files containing process creation logs to use the Process Inspector.</p>
+                </div>
+              );
+
+              const sevColors = { critical: "var(--severity-critical)", high: "var(--severity-high)", medium: "var(--severity-medium)", low: "var(--severity-low)" };
+
+              // Filter tree
+              const searchLower = ptSearch.toLowerCase();
+              const filteredTree = tree.filter(n => {
+                if (ptSevFilter !== "all") {
+                  if (ptSevFilter === "detections" && !n.has_detection) return false;
+                  if (ptSevFilter !== "detections" && !n.detections?.some(d => d.severity === ptSevFilter)) return false;
+                }
+                if (searchLower && !(
+                  (n.name || "").toLowerCase().includes(searchLower) ||
+                  (n.cmd_line || "").toLowerCase().includes(searchLower) ||
+                  (n.user || "").toLowerCase().includes(searchLower)
+                )) return false;
+                return true;
+              });
+
+              return (
+                <div>
+                  {/* Summary */}
+                  <div style={{ display: "flex", gap: 14, padding: "14px 20px", borderBottom: "1px solid var(--border-primary)", flexWrap: "wrap", alignItems: "center" }}>
+                    {[
+                      { label: "Processes", value: summary.total_processes, color: "var(--accent-cyan)" },
+                      { label: "Sysmon", value: summary.sysmon_events, color: "var(--accent-blue)" },
+                      { label: "Security", value: summary.security_events, color: "var(--accent-green)" },
+                      { label: "Findings", value: summary.total_findings, color: "var(--severity-high)" },
+                      { label: "Critical", value: summary.critical_count, color: "var(--severity-critical)" },
+                      { label: "High", value: summary.high_count, color: "var(--severity-high)" },
+                    ].map(s => (
+                      <div key={s.label} style={{ textAlign: "center", minWidth: 55 }}>
+                        <div style={{ fontSize: 18, fontWeight: 700, color: s.color, fontFamily: "var(--font-mono)" }}>{s.value}</div>
+                        <div style={{ fontSize: 8, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: 1 }}>{s.label}</div>
+                      </div>
+                    ))}
+                    <button className="btn btn-secondary" onClick={runProcessTree} style={{ marginLeft: "auto", fontSize: 10 }}>Refresh</button>
+                  </div>
+
+                  {/* Filters */}
+                  <div style={{ display: "flex", gap: 8, padding: "10px 16px", borderBottom: "1px solid var(--border-primary)", alignItems: "center", flexWrap: "wrap" }}>
+                    <input type="text" value={ptSearch} onChange={e => setPtSearch(e.target.value)}
+                      placeholder="Search process name, command line, user..."
+                      style={{ flex: 1, minWidth: 200, padding: "6px 10px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 12 }} />
+                    {["all", "detections", "critical", "high", "medium"].map(f => (
+                      <button key={f} className={`filter-chip ${ptSevFilter === f ? "active" : ""}`}
+                        onClick={() => setPtSevFilter(f)}
+                        style={{ fontSize: 10 }}>
+                        {f === "all" ? "All" : f === "detections" ? `Detections (${summary.total_findings})` : f.charAt(0).toUpperCase() + f.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Process Tree */}
+                  <div style={{ padding: 16, maxHeight: "calc(100vh - 350px)", overflowY: "auto" }}>
+                    {filteredTree.length === 0 ? (
+                      <div style={{ padding: 40, textAlign: "center", color: "var(--text-muted)" }}>No matching processes found.</div>
+                    ) : filteredTree.slice(0, 500).map((node, i) => {
+                      const indent = Math.min(node.depth, 10) * 20;
+                      const hasDetection = node.has_detection;
+                      const maxSev = hasDetection ? node.detections.reduce((m, d) => {
+                        const order = { critical: 0, high: 1, medium: 2, low: 3 };
+                        return order[d.severity] < order[m] ? d.severity : m;
+                      }, "low") : null;
+
+                      return (
+                        <div key={node.key || i} style={{
+                          marginLeft: indent,
+                          padding: "6px 12px", marginBottom: 2,
+                          background: hasDetection ? `${sevColors[maxSev]}08` : "transparent",
+                          borderLeft: hasDetection ? `3px solid ${sevColors[maxSev]}` : "3px solid transparent",
+                          borderRadius: 4,
+                          fontSize: 11,
+                        }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            {/* Tree connector */}
+                            {node.depth > 0 && (
+                              <span style={{ color: "var(--text-muted)", fontSize: 10 }}>└─</span>
+                            )}
+                            {/* Process name */}
+                            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, color: hasDetection ? sevColors[maxSev] : "var(--accent-cyan)", fontSize: 12 }}>
+                              {node.name || "unknown"}
+                            </span>
+                            {/* PID */}
+                            <span style={{ fontFamily: "var(--font-mono)", fontSize: 9, color: "var(--text-muted)" }}>
+                              PID:{node.pid}
+                            </span>
+                            {/* User */}
+                            {node.user && (
+                              <span style={{ fontSize: 9, color: "var(--text-muted)" }}>{node.user}</span>
+                            )}
+                            {/* Integrity */}
+                            {node.integrity && (
+                              <span style={{
+                                fontSize: 8, padding: "1px 5px", borderRadius: 3,
+                                background: node.integrity === "System" ? "#ef444420" : node.integrity === "High" ? "#f59e0b20" : "#6b728020",
+                                color: node.integrity === "System" ? "#ef4444" : node.integrity === "High" ? "#f59e0b" : "var(--text-muted)",
+                                fontFamily: "var(--font-mono)",
+                              }}>{node.integrity}</span>
+                            )}
+                            {/* Timestamp */}
+                            <span style={{ fontSize: 9, color: "var(--text-muted)", marginLeft: "auto", fontFamily: "var(--font-mono)" }}>
+                              {(node.timestamp || "").slice(0, 19)}
+                            </span>
+                          </div>
+
+                          {/* Command line */}
+                          {node.cmd_line && (
+                            <div style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-secondary)", marginTop: 3, marginLeft: node.depth > 0 ? 24 : 0, wordBreak: "break-all", lineHeight: 1.4 }}>
+                              {node.cmd_line.length > 200 ? node.cmd_line.slice(0, 200) + "…" : node.cmd_line}
+                            </div>
+                          )}
+
+                          {/* Detection badges */}
+                          {hasDetection && node.detections.map((det, di) => (
+                            <div key={di} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, marginLeft: node.depth > 0 ? 24 : 0 }}>
+                              <span style={{ fontSize: 9, fontWeight: 700, color: sevColors[det.severity], textTransform: "uppercase", fontFamily: "var(--font-mono)", padding: "1px 6px", background: `${sevColors[det.severity]}15`, borderRadius: 3 }}>
+                                {det.severity}
+                              </span>
+                              <span style={{ fontSize: 9, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)" }}>
+                                {det.mitre?.join(", ")}
+                              </span>
+                              <span style={{ fontSize: 10, color: "var(--text-secondary)" }}>
+                                {det.rule_name}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                    {filteredTree.length > 500 && (
+                      <p style={{ textAlign: "center", color: "var(--text-muted)", fontSize: 11, marginTop: 12 }}>
+                        Showing 500 of {filteredTree.length} processes
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
 
         {/* Timeline Tab */}
         {activeTab === "timeline" && (
@@ -2907,7 +3820,7 @@ export default function SigilDFIR() {
                         ));
                       })()}
                       <span style={{ color: "var(--text-muted)" }}>
-                        ({(artifacts.reduce((s, a) => s + a.size, 0) / 1024).toFixed(1)} KB total)
+                        ({(artifacts.reduce((s, a) => s + (a.size || a.hashes?.file_size || 0), 0) / 1024).toFixed(1)} KB total)
                       </span>
                     </div>
                   </div>
@@ -2930,7 +3843,7 @@ export default function SigilDFIR() {
                             {a.logType ? logTypeLabel(a.logType) : "Unknown"}
                           </span>
                           <span style={{ color: "var(--text-muted)", fontSize: 10 }}>
-                            {(a.size / 1024).toFixed(1)}KB
+                            {((a.size || a.hashes?.file_size || 0) / 1024).toFixed(1)}KB
                           </span>
                           {a.parsedBackend && (
                             <span className="parsed-badge backend">
@@ -3159,19 +4072,19 @@ export default function SigilDFIR() {
                     </div>
                   )}
                   {filteredFindings.map(f => {
-                    const isOpen = expandedFindings.has(f.id);
+                    const isOpen = expandedFindings.has(f.uid || f.id);
                     return (
-                      <div key={f.id} className="finding-card">
-                        <div className="finding-header" onClick={() => toggleFinding(f.id)}>
+                      <div key={f.uid || f.id} className="finding-card">
+                        <div className="finding-header" onClick={() => toggleFinding(f.uid || f.id)}>
                           <div className="finding-header-left">
                             <span className={`severity-dot severity-${f.severity}`} />
                             <span className="finding-title">{f.name}</span>
                             <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{f.id}</span>
                           </div>
                           <div className="finding-header-right">
-                            {getBookmarkedCountForFinding(f.id) > 0 && (
+                            {getBookmarkedCountForFinding(f.uid || f.id) > 0 && (
                               <span style={{ fontSize: 11, color: "var(--accent-orange)", fontFamily: "var(--font-mono)", fontWeight: 600 }}>
-                                ★ {getBookmarkedCountForFinding(f.id)}
+                                ★ {getBookmarkedCountForFinding(f.uid || f.id)}
                               </span>
                             )}
                             <div className="confidence-meter">
@@ -3247,7 +4160,7 @@ export default function SigilDFIR() {
                   })}
                 </div>
 
-                {/* Export */}
+                {/* Export & Tools */}
                 <div className="export-bar">
                   <button className="btn btn-secondary" onClick={exportJSON}>
                     <Icons.Download /> Export JSON
@@ -3269,6 +4182,7 @@ export default function SigilDFIR() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

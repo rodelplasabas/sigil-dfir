@@ -3,21 +3,28 @@ title SIGIL DFIR - Launcher
 echo.
 echo  ========================================
 echo   SIGIL - DFIR Compromise Assessment Tool
+echo   v2.0.0
 echo  ========================================
 echo.
 
-:: Start the Python backend in a new window
-echo [*] Starting EVTX Parser Backend on port 8001...
-start "SIGIL Backend" cmd /k "cd /d %~dp0backend && python -m uvicorn main:app --reload --port 8001"
+:: Clear Python bytecode cache to prevent stale code issues
+echo [*] Clearing Python cache...
+cd /d %~dp0backend
+if exist "__pycache__" rd /s /q "__pycache__"
+if exist "detection\__pycache__" rd /s /q "detection\__pycache__"
+if exist "parser\__pycache__" rd /s /q "parser\__pycache__"
+cd /d %~dp0
+echo     Done.
+echo.
 
-:: Give backend a moment to start
-timeout /t 2 /nobreak >nul
+echo [*] Starting SIGIL Backend on port 8001...
+start "SIGIL Backend" cmd /c "cd /d %~dp0backend && python -m uvicorn main:app --reload --port 8001"
 
-:: Start the frontend in a new window
-echo [*] Starting SIGIL Frontend...
-start "SIGIL Frontend" cmd /k "cd /d %~dp0frontend && npm run dev"
+timeout /t 3 /nobreak >nul
 
-:: Wait for frontend to be ready
+echo [*] Starting SIGIL Frontend on port 5173...
+start "SIGIL Frontend" cmd /c "cd /d %~dp0frontend && npm run dev"
+
 timeout /t 3 /nobreak >nul
 
 echo.
@@ -25,9 +32,34 @@ echo [+] SIGIL is running!
 echo     Frontend: http://localhost:5173
 echo     Backend:  http://localhost:8001
 echo.
-echo [*] Close this window or press any key to stop both services.
+echo [*] Press any key to stop SIGIL...
 pause >nul
 
-:: Kill both processes when this window is closed
+echo.
+echo [*] Shutting down SIGIL...
+
 taskkill /FI "WINDOWTITLE eq SIGIL Backend*" /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq SIGIL Frontend*" /F >nul 2>&1
+
+for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8001" ^| findstr "LISTENING"') do (
+    if not "%%a"=="0" taskkill /PID %%a /T /F >nul 2>&1
+)
+
+for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":5173" ^| findstr "LISTENING"') do (
+    if not "%%a"=="0" taskkill /PID %%a /T /F >nul 2>&1
+)
+
+timeout /t 1 /nobreak >nul
+
+set "STILL_RUNNING=0"
+netstat -aon 2>nul | findstr ":8001.*LISTENING" >nul 2>&1 && set "STILL_RUNNING=1"
+netstat -aon 2>nul | findstr ":5173.*LISTENING" >nul 2>&1 && set "STILL_RUNNING=1"
+
+if "%STILL_RUNNING%"=="1" (
+    echo [!] Some processes may still be running. Forcing cleanup...
+    for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":8001" ^| findstr "LISTENING"') do taskkill /PID %%a /T /F >nul 2>&1
+    for /f "tokens=5" %%a in ('netstat -aon 2^>nul ^| findstr ":5173" ^| findstr "LISTENING"') do taskkill /PID %%a /T /F >nul 2>&1
+)
+
+echo [+] SIGIL stopped.
+timeout /t 2 >nul

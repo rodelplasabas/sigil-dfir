@@ -1,5 +1,51 @@
 # SIGIL — Changelog
 
+## v2.0.0 — March 28, 2026 (GMT+8)
+### Added
+- **Case-first architecture** — examiners must create a case before uploading files; all data persists in a SQLite database (`sigil.db`) inside the case folder
+- **Case Gate screen** — new landing screen with "New Case" and "Open Existing Case" options; no file uploads until a case is active
+- **New Case form** — Case Name, Examiner, Organization, Description, and Save Location (native folder picker via backend)
+- **SQLite persistence layer** (`case_db.py`) — 10+ tables covering artifacts, findings, matched events, bookmarks, lateral movement data, and overall score; WAL mode with 64MB cache
+- **JSONL event storage** — parsed events dumped to JSONL files in the case data folder for fast sequential reads during detection; avoids SQLite bottleneck on large EVTX files
+- **Self-contained finding evidence** — `finding_events` table stores matched event data directly (record_id, event_id, timestamp, content, fields, EventData XML, context) instead of FK references to an events table
+- **Crash/refresh recovery** — frontend calls `GET /case/info` on mount; if backend has an active case, all state (artifacts, findings, bookmarks, LM results, overall score) is restored instantly
+- **Case folder portability** — uploaded files copied into case folder; reports saved to `case/reports/`; entire folder can be shared between examiners
+- **12 new `/case/*` API endpoints** — create, open, close, browse-folder, browse-file, upload, analyze, bookmark, lateral-movement, report, info, test-lateral-movement
+- **Lateral Movement Tracker** — dedicated tab with EventID config screen, draggable SVG network graph, click-to-highlight, timeline, chain detection, and auto-generated findings
+- **Lateral movement persistence** — LM results (logons, graph nodes/edges, chains, findings, summary) saved to SQLite and restored on case open
+- **IRFlow-inspired LM detections** — 11 detectors including smbexec (random 8-char service names), cleartext logon (LogonType 8), ADMIN$/C$ share access, pivot host detection, RDP session correlation, Kerberoasting, and explicit credential abuse
+- **Process Inspector tab** — process tree visualization from Sysmon Event ID 1 data
+- **3 new detection rules** — WIN-012 Anonymous/NTLM Logon from Remote IP, WIN-013 Pass-the-Hash/Explicit Credential Logon, WIN-014 Special Privileges Assigned to New Logon
+- **Unique finding identifiers** — each finding gets a `uid` field combining rule ID and database ID (e.g., `WIN-003_7`) for correct expand/collapse and bookmarking when the same rule triggers across multiple artifacts
+- **Full Event XML in evidence viewer** — "Show more" now displays the complete `<Event>` XML (System + EventData) instead of just the `<EventData>` fragment; matches Windows Event Viewer XML output
+- **`GET /health` endpoint** — returns backend status, version, and active case state
+ 
+### Changed
+- **Architecture: case-first workflow** — all endpoints migrated from stateless `/parse`, `/analyze`, `/lateral-movement` to case-scoped `/case/*` equivalents
+- **Event storage: JSONL over SQLite** — events written to JSONL files during upload for speed; SQLite used only for metadata, findings, and LM data
+- **Finding↔event linkage** — replaced FK junction table (`finding_events` → `events`) with self-contained matched event storage; detection engine output written directly to `finding_events` with full event data
+- **Report generation** — `/case/report` now uses frontend-provided pre-filtered data (respects Bookmarked Only, Critical & High, Critical Only selections) instead of re-querying SQLite
+- **Bookmark scope** — bookmark keys use `uid:recordId` format instead of `ruleId:recordId`, preventing cross-finding bookmark collisions when duplicate rules exist
+- **Close case cleanup** — resets all UI state including `activeTab`, `processTree`, `lateralMovement`, `lmNodePositions`, `lmSelectedNode`, findings, artifacts, bookmarks, and overall score
+- **EVTX parser XML output** — `_build_event_data_xml` replaced with `_build_full_event_xml` reconstructing complete Event XML with System metadata (Provider, EventID, Level, Task, Keywords, TimeCreated, Execution, Channel, Computer, Security); legacy parser stores raw `record.xml()` directly
+- **Version bumped** to v2.0.0
+- **`start-sigil.bat`** — clears `__pycache__` on startup; uses `cmd /c` instead of `cmd /k`; kills processes by port PID with `/T` (tree kill) for reliable shutdown; verifies ports are freed before exiting
+ 
+### Fixed
+- **Evidence viewer showing 0 events** — `insert_finding` was looking up `record_id` in an empty `events` table; fixed by storing matched event data directly in `finding_events`
+- **Duplicate findings expanding together** — all findings with the same rule ID (e.g., three "Event Log Cleared" WIN-003) shared the same expand/collapse key; fixed with unique `uid` per finding
+- **Bookmarks bleeding across duplicate findings** — bookmarking an event in one "Event Log Cleared" showed stars on all three; fixed by scoping bookmark keys to `uid`
+- **Report generation 404** — frontend was hitting `/report` instead of `/case/report`
+- **Report generation `'int' object is not iterable`** — `generate_report()` was called with a single dict instead of separate arguments; DB column names (`rule_id`, `rule_name`) didn't match expected field names (`id`, `name`)
+- **Report ignoring Bookmarked Only filter** — backend was re-querying all findings from SQLite instead of using the frontend's pre-filtered payload
+- **Process Inspector stale state** — closing a case didn't clear `processTree`, so results from the previous case persisted
+- **Lateral Movement empty graph on case open** — node positions weren't initialized when restoring LM data from SQLite; graph SVG rendered with undefined coordinates
+- **Lateral Movement stale panel after close** — `activeTab` wasn't reset on case close, leaving the LM tab visible with empty/stale data in the new case
+- **`limit=None` SQLite datatype mismatch** — `get_events_by_artifact(limit=None)` passed `None` to SQL `LIMIT` clause; fixed with conditional query
+- **Slow finding insertion** — per-event `SELECT` queries replaced with batch `IN` lookup
+- **Missing `/health` endpoint** — backend connectivity check returned 404
+- **`final` variable reference error** — stale `final.length` reference in analyze flow caused silent crash; replaced with `allFindings.length`
+
 ## v1.4.0 — March 27, 2026 (GMT+8)
 ### Added
 - **evtx_dump integration** — replaced python-evtx with Rust-based evtx_dump binary (omerbenamram/evtx) for EVTX parsing; auto-detects binary in backend directory or PATH; falls back to python-evtx if not found
@@ -64,16 +110,16 @@
 
 ## v1.1.0 — March 26, 2026, 5:45 AM (GMT+8)
 ### Added
-- **Phase 3**: Frontend is now a thin API client (~1,000 lines of engine code removed)
+- Frontend is now a thin API client (~1,000 lines of engine code removed)
 - All file parsing routed through backend `/parse` endpoint
 - All detection routed through backend `/analyze` endpoint
 - Pasted content sent to backend as File blob
-- **Phase 2**: Rule management API with SQLite persistence
+- Rule management API with SQLite persistence
 - Rule CRUD endpoints (create, read, update, delete, toggle, reset)
 - Sigma YAML import via backend (`POST /rules/import-sigma`)
 - Duplicate Sigma rule detection by `sigma_id`
 - Rules persist across restarts in `sigil_rules.db`
-- **Phase 1**: Detection engine moved to Python backend
+- Detection engine moved to Python backend
 - Web log parser (Apache/Nginx/IIS) ported to Python
 - Registry parser ported to Python
 - Detection engine with provider filtering and IOC matching

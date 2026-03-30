@@ -70,6 +70,13 @@ def _get_conn():
 @app.on_event("startup")
 def startup():
     init_db()
+    # Check for evtx_dump binary on startup
+    from parser.evtx_parser import _find_evtx_dump
+    evtx_path = _find_evtx_dump()
+    if evtx_path:
+        print(f"[SIGIL] ✓ evtx_dump ready: {evtx_path}")
+    else:
+        print(f"[SIGIL] ✗ evtx_dump not found — EVTX parsing will use python-evtx (much slower)")
 
 
 @app.get("/health")
@@ -147,12 +154,14 @@ def parse_file(content, log_type, tmp_path=None, filename=""):
         return {"events": events, "log_type": log_type, "format": "evtx",
                 "event_count": len(events)}
     elif log_type == "registry":
-        events = parse_registry(content)
+        result = parse_registry(content)
+        events = result.get("events", []) if isinstance(result, dict) else result
         return {"events": events, "log_type": log_type, "format": "registry",
                 "event_count": len(events)}
     else:
-        events = parse_web_logs(content)
-        fmt = "iis" if "s-ip" in content[:500].lower() else "apache/nginx"
+        result = parse_web_logs(content)
+        events = result.get("events", []) if isinstance(result, dict) else result
+        fmt = result.get("format", "Apache/Nginx") if isinstance(result, dict) else "Apache/Nginx"
         return {"events": events, "log_type": log_type, "format": fmt,
                 "event_count": len(events)}
 
@@ -441,32 +450,56 @@ async def case_upload(file: UploadFile = File(...)):
 @app.post("/case/analyze")
 async def case_analyze(
     ioc_list: Optional[str] = Form(None),
-    ioc_enabled: Optional[bool] = Form(True)
+    ioc_enabled: Optional[bool] = Form(True),
+    force_reanalyze: Optional[bool] = Form(False)
 ):
-    """Run detection on ALL events by reading from JSONL files."""
+    """Run detection on new artifacts only. Previously analyzed artifacts are skipped.
+    Set force_reanalyze=true to re-process all artifacts from scratch."""
     conn = _get_conn()
     try:
         artifacts = get_all_artifacts(conn)
         if not artifacts:
             return {"status": "error", "message": "No artifacts uploaded yet"}
 
-        # Clear previous findings
-        clear_findings(conn)
+        if force_reanalyze:
+            # Full re-analysis: clear everything and process all artifacts
+            clear_findings(conn)
+            pending_artifacts = artifacts
+            print("[SIGIL] Force re-analyze: processing all artifacts")
+        else:
+            # Incremental: only process artifacts not yet analyzed
+            pending_artifacts = [a for a in artifacts if a.get("status") != "complete"]
+            if not pending_artifacts:
+                # Nothing new to analyze — return existing findings
+                stored_findings = get_all_findings(conn)
+                overall_score = get_overall_score(conn)
+                return {
+                    "status": "success",
+                    "findings": stored_findings,
+                    "overall_score": overall_score or {"label": "CLEAN", "color": "#10b981", "score": 0},
+                    "total_events": sum(a.get("event_count", 0) for a in artifacts),
+                    "artifacts_analyzed": len(artifacts),
+                    "message": "All artifacts already analyzed. No new files to process.",
+                }
+            print(f"[SIGIL] Incremental analyze: {len(pending_artifacts)} new artifact(s), "
+                  f"{len(artifacts) - len(pending_artifacts)} already complete")
 
-        all_findings = []
-        total_events = 0
+        new_findings = []
+        total_new_events = 0
 
-        # Run detection per artifact (read events from JSONL)
-        for artifact in artifacts:
+        # Run detection on pending artifacts only
+        for artifact in pending_artifacts:
             jsonl_path = artifact.get("file_path", "")
             if not jsonl_path or not os.path.exists(jsonl_path):
+                update_artifact_status(conn, artifact["id"], "complete")
                 continue
 
             events = _load_events_from_jsonl(jsonl_path)
             if not events:
+                update_artifact_status(conn, artifact["id"], "complete")
                 continue
 
-            total_events += len(events)
+            total_new_events += len(events)
             log_type = artifact["log_type"]
 
             # Get rules for this log type
@@ -485,15 +518,16 @@ async def case_analyze(
             # Run detection
             findings = run_detection(events, log_type, rules, ioc_rules)
 
-            # Store findings in SQLite (only findings, not all events)
+            # Store findings in SQLite
             for f in findings:
                 insert_finding(conn, f)
-                all_findings.append(f)
+                new_findings.append(f)
 
             update_artifact_status(conn, artifact["id"], "complete")
             print(f"[SIGIL] Analyzed {artifact['filename']}: {len(findings)} findings from {len(events)} events")
 
-        # Compute and store overall score
+        # Recompute overall score from ALL findings (existing + new)
+        all_findings = get_all_findings(conn)
         overall_score = compute_overall_score(all_findings)
         insert_overall_score(conn, overall_score)
 
@@ -505,9 +539,10 @@ async def case_analyze(
 
         # Return findings from database (with matched events and bookmarks)
         stored_findings = get_all_findings(conn)
+        total_events = sum(a.get("event_count", 0) for a in artifacts)
 
-        print(f"[SIGIL] Analysis complete: {len(stored_findings)} findings, "
-              f"{total_events} events, score: {overall_score['label']}")
+        print(f"[SIGIL] Analysis complete: {len(stored_findings)} findings ({len(new_findings)} new), "
+              f"{total_new_events} new events processed, {total_events} total events, score: {overall_score['label']}")
 
         return {
             "status": "success",
@@ -515,6 +550,7 @@ async def case_analyze(
             "overall_score": overall_score,
             "total_events": total_events,
             "artifacts_analyzed": len(artifacts),
+            "new_artifacts_analyzed": len(pending_artifacts),
         }
     except Exception as e:
         import traceback

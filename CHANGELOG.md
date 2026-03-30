@@ -1,5 +1,20 @@
 # SIGIL — Changelog
 
+## v2.1.0 — March 30, 2026 (GMT+8)
+### Added
+- **Incremental threat hunt** — `/case/analyze` now only processes artifacts not yet analyzed; previously completed artifacts are skipped and their findings preserved; supports `force_reanalyze=true` for full re-analysis when needed
+- **Cross-platform evtx_dump detection** — `_find_evtx_dump` now detects the examiner's OS and architecture (Windows, macOS Intel/ARM, Linux x64/ARM64) and selects the correct binary automatically; all platform binaries can be placed in `backend/tools/` and SIGIL picks the right one
+- **Linux/macOS launcher** — `start-sigil.sh` added alongside `start-sigil.bat`; clears `__pycache__`, auto-sets execute permissions on `evtx_dump` binaries, traps `Ctrl+C` for clean shutdown, kills processes by PID and port (`lsof`/`fuser` fallback)
+ 
+### Changed
+- **Analyze endpoint** — tracks artifact status (`parsed` → `complete`); skips artifacts already marked `complete`; recomputes overall score from all findings (existing + new) after each incremental run
+- **Analyze logging** — prints incremental status showing new vs already-complete artifact counts (e.g., `Incremental analyze: 2 new artifact(s), 81 already complete`)
+- **Empty artifact handling** — artifacts with 0 events or missing JSONL paths are now marked `complete` after analysis to prevent re-processing on subsequent runs
+- **evtx_dump startup logging** — prints detected platform, binary path, and download instructions if not found
+ 
+### Fixed
+- **Web server logs parsed as single dict** — `parse_web_logs()` returns `{"format":..., "event_count":N, "events":[...]}` but `parse_file` was assigning the whole dict to `events` instead of extracting the list; same bug affected `parse_registry()`; caused JSONL files to contain one line (the serialized dict) instead of individual event lines, resulting in 0 parseable events during analysis
+
 ## v2.0.0 — March 28, 2026 (GMT+8)
 ### Added
 - **Case-first architecture** — examiners must create a case before uploading files; all data persists in a SQLite database (`sigil.db`) inside the case folder

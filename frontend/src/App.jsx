@@ -1417,7 +1417,7 @@ export default function SigilDFIR() {
             matchedEvents: (f.matched_events || []).map(e => ({
               timestamp: e.timestamp, eventId: e.event_id, recordId: e.record_id,
               content: e.content, message: e.message, fields: e.fields || {},
-              eventDataXml: e.event_data_xml || "", context: e.context || [],
+              eventDataXml: e.event_data_xml || "", context: e.context || [], source: e.source || "",
             })),
           })));
         }
@@ -1620,7 +1620,7 @@ export default function SigilDFIR() {
             matchedEvents: (f.matched_events || []).map(e => ({
               timestamp: e.timestamp, eventId: e.event_id, recordId: e.record_id,
               content: e.content, message: e.message, fields: e.fields || {},
-              eventDataXml: e.event_data_xml || "", context: e.context || [],
+              eventDataXml: e.event_data_xml || "", context: e.context || [], source: e.source || "",
             })),
           })));
         }
@@ -1869,7 +1869,7 @@ export default function SigilDFIR() {
             structuredFields: e.fields,
             line_index: e.line_index,
             context: e.context || [],
-            eventDataXml: e.event_data_xml || ""
+            eventDataXml: e.event_data_xml || "", source: e.source || ""
           })),
           nextSteps: f.next_steps || [],
           isIocRule: f.is_ioc_rule || false,
@@ -2536,7 +2536,8 @@ export default function SigilDFIR() {
             (f.method || "").toLowerCase().includes(s) ||
             (f.status || "").includes(s) ||
             (f.uri || "").toLowerCase().includes(s) ||
-            (f.userAgent || "").toLowerCase().includes(s);
+            (f.userAgent || "").toLowerCase().includes(s) ||
+            (e.source || "").toLowerCase().includes(s);
         })
       : events;
 
@@ -2589,7 +2590,6 @@ export default function SigilDFIR() {
           </div>
           <div className="evidence-stats">
             <div>Matched events: <span>{events.length}</span></div>
-            <div>Source: <span>{finding.source}</span></div>
             <div>Confidence: <span>{finding.confidence}%</span></div>
             {filtered.length !== events.length && <div>Showing: <span>{filtered.length}</span> filtered</div>}
             {finding._timelineClick && (() => {
@@ -2632,6 +2632,7 @@ export default function SigilDFIR() {
                         <th style={{ width: 50 }}>Status</th>
                         <th style={{ width: 150 }}>Timestamp</th>
                         <th>URI / Content</th>
+                        <th style={{ width: 120 }}>Source</th>
                       </>
                     ) : (
                       <>
@@ -2639,6 +2640,7 @@ export default function SigilDFIR() {
                         <th style={{ width: 70 }}>Event ID</th>
                         <th style={{ width: 160 }}>Timestamp</th>
                         <th>Content</th>
+                        <th style={{ width: 120 }}>Source</th>
                       </>
                     )}
                   </tr>
@@ -2692,6 +2694,7 @@ export default function SigilDFIR() {
                                 </div>
                               )}
                             </td>
+                            <td><span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>{ev.source || "—"}</span></td>
                           </>
                         ) : (
                           <>
@@ -2754,6 +2757,7 @@ export default function SigilDFIR() {
                                 </div>
                               )}
                             </td>
+                            <td><span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>{ev.source || "—"}</span></td>
                           </>
                         )}
                       </tr>
@@ -4124,9 +4128,7 @@ export default function SigilDFIR() {
                                 <h4><Icons.Search /> Detection Details</h4>
                                 <div className="match-info">
                                   Pattern matches: <span>{f.matchCount}</span><br />
-                                  Keyword hits: <span>{f.keywordHits}</span><br />
-                                  Source: <span>{f.source}</span><br />
-                                  Type: <span style={{ color: logTypeColor(f.logType) }}>{logTypeLabel(f.logType)}</span>
+                                  Keyword hits: <span>{f.keywordHits}</span>
                                 </div>
                                 {f.excerpts?.length > 0 && (
                                   <div className="excerpts" style={{ marginTop: 10 }}>

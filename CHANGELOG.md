@@ -1,10 +1,17 @@
 # SIGIL — Changelog
 
-## v2.1.1 — March 30, 2026 (GMT+8)
+## v2.1.2 — March 30, 2026, 1:27 PM (GMT+8)
+### Changed
+- **Merged duplicate findings** — findings with the same rule ID across multiple artifacts (e.g., WEB-002 from `access.log` and `access.log.1`) are now merged into a single finding with combined matched events; each event tagged with its source artifact filename
+- **Source moved to evidence table** — removed Source from Detection Details box and Evidence modal header; added Source as a new column in the Evidence table (both EVTX and web log modes) so examiners can see which artifact each event came from
+- **Evidence search includes source** — filtering in the Evidence modal now matches against the source filename
+- **Removed "Type: Unknown"** — the log type label in Detection Details was never populated from the API; removed the orphaned display line
+
+## v2.1.1 — March 30, 2026, 12:24 PM (GMT+8)
 ### Fixed
 - **Finding source not displayed** — evidence viewer modal showed empty "Source:" field; added `source` column to `findings` table, populated with artifact filename during analysis (e.g., `Security.evtx`, `access.log`); all three frontend finding mappings (analyze, case open, case recovery) now include `source`
 
-## v2.1.0 — March 30, 2026 (GMT+8)
+## v2.1.0 — March 30, 2026, 12:03 PM (GMT+8)
 ### Added
 - **Incremental threat hunt** — `/case/analyze` now only processes artifacts not yet analyzed; previously completed artifacts are skipped and their findings preserved; supports `force_reanalyze=true` for full re-analysis when needed
 - **Cross-platform evtx_dump detection** — `_find_evtx_dump` now detects the examiner's OS and architecture (Windows, macOS Intel/ARM, Linux x64/ARM64) and selects the correct binary automatically; all platform binaries can be placed in `backend/tools/` and SIGIL picks the right one

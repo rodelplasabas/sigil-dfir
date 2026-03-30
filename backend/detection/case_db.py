@@ -440,8 +440,8 @@ def insert_overall_score(conn, score):
 
 
 def get_all_findings(conn):
-    """Get all findings with their matched events."""
-    findings = []
+    """Get all findings with their matched events. Merges findings with the same rule_id."""
+    raw_findings = []
     rows = conn.execute("SELECT * FROM findings ORDER BY "
                         "CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 "
                         "WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, "
@@ -451,6 +451,7 @@ def get_all_findings(conn):
         f = dict(row)
         f["mitre"] = json.loads(f.pop("mitre_json", "[]"))
         f["next_steps"] = json.loads(f.pop("next_steps_json", "[]"))
+        source = f.get("source", "")
 
         # Get matched events stored directly in finding_events
         event_rows = conn.execute(
@@ -470,6 +471,8 @@ def get_all_findings(conn):
                 ev["context"] = json.loads(ev.pop("context_json", "[]"))
             except (json.JSONDecodeError, TypeError):
                 ev["context"] = []
+            # Tag each event with the source artifact
+            ev["source"] = source
             matched.append(ev)
 
         f["matched_events"] = matched
@@ -481,7 +484,43 @@ def get_all_findings(conn):
         ).fetchall()
         f["bookmarked_event_ids"] = [r["event_id"] for r in bm_rows]
 
-        findings.append(f)
+        raw_findings.append(f)
+
+    # Merge findings with the same rule_id
+    merged_map = {}
+    for f in raw_findings:
+        rule_id = f.get("rule_id", "")
+        if rule_id in merged_map:
+            m = merged_map[rule_id]
+            # Combine matched events
+            m["matched_events"].extend(f.get("matched_events", []))
+            # Aggregate counts
+            m["match_count"] = m.get("match_count", 0) + f.get("match_count", 0)
+            m["keyword_hits"] = max(m.get("keyword_hits", 0), f.get("keyword_hits", 0))
+            m["confidence"] = max(m.get("confidence", 0), f.get("confidence", 0))
+            # Merge sources
+            new_source = f.get("source", "")
+            if new_source and new_source not in m.get("sources", []):
+                m["sources"].append(new_source)
+            # Merge bookmarks
+            m["bookmarked_event_ids"].extend(f.get("bookmarked_event_ids", []))
+            # Collect db IDs for bookmark operations
+            m["db_ids"].append(f["id"])
+        else:
+            f["sources"] = [f.get("source", "")] if f.get("source") else []
+            f["db_ids"] = [f["id"]]
+            merged_map[rule_id] = f
+
+    # Sort merged results and re-sort matched events by timestamp
+    findings = list(merged_map.values())
+    for f in findings:
+        f["matched_events"].sort(key=lambda e: e.get("timestamp") or "")
+        f["match_count"] = len(f["matched_events"])
+
+    findings.sort(key=lambda f: (
+        {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(f.get("severity", "medium"), 4),
+        -(f.get("confidence", 0))
+    ))
 
     return findings
 

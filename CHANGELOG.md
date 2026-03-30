@@ -1,5 +1,9 @@
 # SIGIL — Changelog
 
+## v2.1.1 — March 30, 2026 (GMT+8)
+### Fixed
+- **Finding source not displayed** — evidence viewer modal showed empty "Source:" field; added `source` column to `findings` table, populated with artifact filename during analysis (e.g., `Security.evtx`, `access.log`); all three frontend finding mappings (analyze, case open, case recovery) now include `source`
+
 ## v2.1.0 — March 30, 2026 (GMT+8)
 ### Added
 - **Incremental threat hunt** — `/case/analyze` now only processes artifacts not yet analyzed; previously completed artifacts are skipped and their findings preserved; supports `force_reanalyze=true` for full re-analysis when needed

@@ -76,6 +76,7 @@ def create_case_db(db_path: str) -> sqlite3.Connection:
             confidence      INTEGER DEFAULT 0,
             next_steps_json TEXT,
             is_ioc_rule     BOOLEAN DEFAULT 0,
+            source          TEXT,
             created_at      TEXT
         );
 
@@ -211,6 +212,38 @@ def open_case_db(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
+
+    # Migrate finding_events table if it has the old schema (FK-based)
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(finding_events)").fetchall()]
+        if "event_id_str" not in cols:
+            print("[SIGIL] Migrating finding_events table to v2.0 schema...")
+            conn.execute("DROP TABLE IF EXISTS finding_events")
+            conn.execute("""
+                CREATE TABLE finding_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    finding_id      INTEGER NOT NULL,
+                    record_id       TEXT,
+                    event_id_str    TEXT,
+                    timestamp       TEXT,
+                    content         TEXT,
+                    message         TEXT,
+                    fields_json     TEXT,
+                    event_data_xml  TEXT,
+                    line_index      INTEGER,
+                    context_json    TEXT,
+                    FOREIGN KEY (finding_id) REFERENCES findings(id)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fe_finding ON finding_events(finding_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fe_record ON finding_events(record_id)")
+            # Clear old findings since they can't link to the new schema
+            conn.execute("DELETE FROM findings")
+            conn.commit()
+            print("[SIGIL] Migration complete. Re-run threat hunt to regenerate findings.")
+    except Exception as e:
+        print(f"[SIGIL] Schema migration check: {e}")
+
     return conn
 
 
@@ -350,8 +383,8 @@ def insert_finding(conn, finding):
     """Insert a finding and its matched events. Returns finding_id."""
     cur = conn.execute(
         "INSERT INTO findings (rule_id, rule_name, description, severity, mitre_json, "
-        "match_count, keyword_hits, confidence, next_steps_json, is_ioc_rule, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "match_count, keyword_hits, confidence, next_steps_json, is_ioc_rule, source, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             finding["id"], finding["name"], finding.get("description", ""),
             finding.get("severity", "medium"),
@@ -361,6 +394,7 @@ def insert_finding(conn, finding):
             finding.get("confidence", 0),
             json.dumps(finding.get("next_steps", [])),
             finding.get("is_ioc_rule", False),
+            finding.get("source", ""),
             datetime.utcnow().isoformat(),
         )
     )

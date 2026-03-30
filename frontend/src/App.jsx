@@ -1413,7 +1413,7 @@ export default function SigilDFIR() {
             description: f.description, severity: f.severity,
             mitre: f.mitre || [], matchCount: f.match_count,
             keywordHits: f.keyword_hits, confidence: f.confidence,
-            nextSteps: f.next_steps || [], isIocRule: f.is_ioc_rule,
+            nextSteps: f.next_steps || [], isIocRule: f.is_ioc_rule, source: f.source || '',
             matchedEvents: (f.matched_events || []).map(e => ({
               timestamp: e.timestamp, eventId: e.event_id, recordId: e.record_id,
               content: e.content, message: e.message, fields: e.fields || {},
@@ -1616,7 +1616,7 @@ export default function SigilDFIR() {
             description: f.description, severity: f.severity,
             mitre: f.mitre || [], matchCount: f.match_count,
             keywordHits: f.keyword_hits, confidence: f.confidence,
-            nextSteps: f.next_steps || [], isIocRule: f.is_ioc_rule,
+            nextSteps: f.next_steps || [], isIocRule: f.is_ioc_rule, source: f.source || '',
             matchedEvents: (f.matched_events || []).map(e => ({
               timestamp: e.timestamp, eventId: e.event_id, recordId: e.record_id,
               content: e.content, message: e.message, fields: e.fields || {},
@@ -1873,6 +1873,7 @@ export default function SigilDFIR() {
           })),
           nextSteps: f.next_steps || [],
           isIocRule: f.is_ioc_rule || false,
+          source: f.source || '',
         }));
         if (data.overall_score) setOverallScore(data.overall_score);
       }

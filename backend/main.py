@@ -520,6 +520,7 @@ async def case_analyze(
 
             # Store findings in SQLite
             for f in findings:
+                f["source"] = artifact["filename"]
                 insert_finding(conn, f)
                 new_findings.append(f)
 

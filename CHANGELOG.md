@@ -1,5 +1,9 @@
 # SIGIL — Changelog
 
+## v2.2.0 — April 1, 2026, 12:41 PM (GMT+8)
+### Changed
+- **Revamped Timeline Explorer** — timeline will now show all events collated from all process artifacts.
+
 ## v2.1.2 — March 30, 2026, 1:27 PM (GMT+8)
 ### Changed
 - **Merged duplicate findings** — findings with the same rule ID across multiple artifacts (e.g., WEB-002 from `access.log` and `access.log.1`) are now merged into a single finding with combined matched events; each event tagged with its source artifact filename

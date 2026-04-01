@@ -3,7 +3,7 @@ title SIGIL DFIR - Launcher
 echo.
 echo  ========================================
 echo   SIGIL - DFIR Compromise Assessment Tool
-echo   v2.1.0
+echo   v2.2.0
 echo  ========================================
 echo.
 

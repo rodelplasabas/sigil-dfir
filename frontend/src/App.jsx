@@ -1656,6 +1656,8 @@ export default function SigilDFIR() {
     setArtifacts([]); setFindings([]); setOverallScore(null); setBookmarkedEvents(new Set());
     setLateralMovement(null); setLmPhase("config"); setLmSelectedNode(null); setLmNodePositions({});
     setProcessTree(null); setActiveTab("analyze"); setCaseScreen("gate");
+    setTlEvents([]); setTlTotal(0); setTlOffset(0); setTlInitialized(false); setTlSelectedEvent(null);
+    setTlFilters({ sources: [], date_from: "", date_to: "", severities: [], event_ids: [], keyword: "" });
   }, [backendUrl]);
 
   const browseCaseFolder = useCallback(async () => {
@@ -2239,7 +2241,7 @@ export default function SigilDFIR() {
       altPatterns: (f.altPatterns || []).map(p => p instanceof RegExp ? p.source : p),
     }));
     return {
-      sigil_version: "1.0.0",
+      sigil_version: "2.2.0",
       case: { ...caseMeta, savedAt: new Date().toISOString() },
       artifacts: lightArtifacts,
       findings: lightFindings,
@@ -2774,46 +2776,100 @@ export default function SigilDFIR() {
 
   // ── Timeline Builder ───────────────────────────────────────────────────
   const [timelinePage, setTimelinePage] = useState(0);
+  // Full timeline state (virtual scroll)
+  //const [tlEvents, setTlEvents] = useState([]);
+  //const [tlTotal, setTlTotal] = useState(0);
+  //const [tlSources, setTlSources] = useState([]);
+  //const [tlEventIds, setTlEventIds] = useState([]);
+  //const [tlLoading, setTlLoading] = useState(false);
+  //const [tlFilters, setTlFilters] = useState({ sources: [], date_from: "", date_to: "", severities: [], event_ids: [], keyword: "" });
+  //const [tlOffset, setTlOffset] = useState(0);
+  const TL_PAGE_SIZE = 200;
+  const tlScrollRef = useRef(null);
   const [timelineSevFilter, setTimelineSevFilter] = useState("all");
   const TIMELINE_PAGE_SIZE = 100;
+
+  // ── New Full Timeline (virtual scroll, backend-powered) ──
+  const [tlEvents, setTlEvents] = useState([]);
+  const [tlTotal, setTlTotal] = useState(0);
+  const [tlLoading, setTlLoading] = useState(false);
+  const [tlSources, setTlSources] = useState([]);
+  const [tlEventIds, setTlEventIds] = useState([]);
+  const [tlFilters, setTlFilters] = useState({ sources: [], date_from: "", date_to: "", severities: [], event_ids: [], keyword: "" });
+  const [tlOffset, setTlOffset] = useState(0);
+  const [tlInitialized, setTlInitialized] = useState(false);
+  const [tlSelectedEvent, setTlSelectedEvent] = useState(null); // { event, source, log_type, loading }
+  const tlContainerRef = useRef(null);
+  const [tlExpandedRows, setTlExpandedRows] = useState(new Set());
+  const TL_CHUNK = 200;
+  const TL_ROW_HEIGHT = 36;
+
+  const fetchTimeline = useCallback(async (offset = 0, filters = tlFilters, append = false) => {
+    if (!caseActive) return;
+    setTlLoading(true);
+    try {
+      const res = await fetch(`${backendUrl}/case/timeline`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offset, limit: TL_CHUNK, filters }),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        setTlEvents(prev => append ? [...prev, ...data.events] : data.events);
+        setTlTotal(data.total);
+        setTlOffset(offset + data.events.length);
+        if (data.sources) setTlSources(data.sources);
+        if (data.event_ids) setTlEventIds(data.event_ids);
+        if (!tlInitialized) setTlInitialized(true);
+      }
+    } catch (err) {
+      console.error("Timeline fetch error:", err);
+    }
+    setTlLoading(false);
+  }, [backendUrl, caseActive, tlFilters, tlInitialized]);
+
+  const applyTlFilters = useCallback((newFilters) => {
+    setTlFilters(newFilters);
+    setTlEvents([]);
+    setTlOffset(0);
+    fetchTimeline(0, newFilters, false);
+  }, [fetchTimeline]);
+
+  const loadMoreTimeline = useCallback(() => {
+    if (tlLoading || tlOffset >= tlTotal) return;
+    fetchTimeline(tlOffset, tlFilters, true);
+  }, [tlLoading, tlOffset, tlTotal, tlFilters, fetchTimeline]);
+
+  const openTimelineEvent = useCallback(async (ev) => {
+    setTlSelectedEvent({ event: ev, source: ev.source, log_type: "", loading: true });
+    try {
+      const res = await fetch(`${backendUrl}/case/timeline/event`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: ev.source, record_id: ev.record_id }),
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        setTlSelectedEvent({ event: data.event, source: data.source, log_type: data.log_type, loading: false });
+      } else {
+        setTlSelectedEvent(prev => prev ? { ...prev, loading: false } : null);
+      }
+    } catch {
+      setTlSelectedEvent(prev => prev ? { ...prev, loading: false } : null);
+    }
+  }, [backendUrl]);
 
   const buildTimeline = () => {
     if (!findings.length) return [];
     const events = [];
     for (const f of findings) {
-      if (!f.matchedEvents || f.matchedEvents.length === 0) {
-        events.push({
-          timestamp: null,
-          findingId: f.id,
-          findingName: f.name,
-          severity: f.severity,
-          eventId: null,
-          recordId: null,
-          source: f.source,
-          finding: f
-        });
-        continue;
-      }
+      if (!f.matchedEvents || f.matchedEvents.length === 0) continue;
       for (const ev of f.matchedEvents) {
-        events.push({
-          timestamp: ev.timestamp || null,
-          findingId: f.id,
-          findingName: f.name,
-          severity: f.severity,
-          eventId: ev.eventId || ev.event_id || null,
-          recordId: ev.recordId || ev.record_id || null,
-          source: f.source,
-          finding: f,
-          event: ev
-        });
+        events.push({ timestamp: ev.timestamp || null, findingId: f.id, findingName: f.name, severity: f.severity,
+          eventId: ev.eventId || ev.event_id || null, recordId: ev.recordId || ev.record_id || null, source: f.source, finding: f, event: ev });
       }
     }
-    events.sort((a, b) => {
-      if (!a.timestamp && !b.timestamp) return 0;
-      if (!a.timestamp) return 1;
-      if (!b.timestamp) return -1;
-      return a.timestamp.localeCompare(b.timestamp);
-    });
+    events.sort((a, b) => { if (!a.timestamp && !b.timestamp) return 0; if (!a.timestamp) return 1; if (!b.timestamp) return -1; return a.timestamp.localeCompare(b.timestamp); });
     return events;
   };
 
@@ -2877,7 +2933,7 @@ export default function SigilDFIR() {
                   <div>
                     <label style={{ fontSize: 11, color: "var(--text-muted)", display: "block", marginBottom: 4, fontFamily: "var(--font-mono)" }}>Organization</label>
                     <input type="text" value={newCaseOrg} onChange={e => setNewCaseOrg(e.target.value)}
-                      placeholder="e.g. OWWA"
+                      placeholder="e.g. ACME"
                       style={{ width: "100%", padding: "8px 12px", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, color: "var(--text-primary)", fontSize: 13 }} />
                   </div>
                   <div>
@@ -2930,7 +2986,7 @@ export default function SigilDFIR() {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, position: "relative" }}>
-            <span className="version-badge">v2.0.0 — Open Source</span>
+            <span className="version-badge">v2.2.0 — Open Source</span>
             {/* Case management buttons */}
             <button className="btn btn-secondary case-btn" onClick={closeCase} style={{ fontSize: 11 }}>
               Close Case
@@ -3017,8 +3073,8 @@ export default function SigilDFIR() {
           <button className={`tab-btn ${activeTab === "proctree" ? "active" : ""}`} onClick={() => { setActiveTab("proctree"); if (!processTree?.data) runProcessTree(); }}>
             Process Inspector
           </button>
-          <button className={`tab-btn ${activeTab === "timeline" ? "active" : ""}`} onClick={() => setActiveTab("timeline")}>
-            Timeline {findings.length > 0 ? `(${totalTimelineEvents()})` : ""}
+          <button className={`tab-btn ${activeTab === "timeline" ? "active" : ""}`} onClick={() => { setActiveTab("timeline"); if (!tlInitialized && caseActive) fetchTimeline(0); }}>
+            Timeline {tlTotal > 0 ? `(${tlTotal.toLocaleString()})` : ""}
           </button>
           <button className={`tab-btn ${activeTab === "rules" ? "active" : ""}`} onClick={() => setActiveTab("rules")}>Detection Rules ({allRules.length})</button>
         </div>
@@ -3621,135 +3677,315 @@ export default function SigilDFIR() {
         )}
 
         {/* Timeline Tab */}
-        {activeTab === "timeline" && (
+        {activeTab === "timeline" && (() => {
+          const sevColors = { critical: "var(--accent-red)", high: "var(--accent-orange)", medium: "var(--accent-yellow)", low: "var(--accent-blue)" };
+          const handleTlScroll = (e) => {
+            const { scrollTop, scrollHeight, clientHeight } = e.target;
+            if (scrollHeight - scrollTop - clientHeight < 400 && !tlLoading && tlOffset < tlTotal) {
+              loadMoreTimeline();
+            }
+          };
+          return (
           <div>
-            {findings.length === 0 ? (
-              <div className="empty-state">
-                <h3>No Findings Yet</h3>
-                <p>Run a threat hunt in the Analyze tab first. The timeline will show matched events sorted chronologically.</p>
+            {/* Filter bar */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14, padding: "12px 14px", background: "var(--bg-tertiary)", borderRadius: 8, border: "1px solid var(--border-primary)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <h2 style={{ fontSize: 15, fontWeight: 700, display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+                  <Icons.Search /> Full Event Timeline
+                </h2>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
+                  {tlTotal.toLocaleString()} events{tlEvents.length < tlTotal ? ` (${tlEvents.length.toLocaleString()} loaded)` : ""}
+                </span>
               </div>
-            ) : (() => {
-              const allTimelineEvents = buildTimeline();
-              const filteredTimeline = timelineSevFilter === "all"
-                ? allTimelineEvents
-                : allTimelineEvents.filter(ev => ev.severity === timelineSevFilter);
-              const totalEvents = filteredTimeline.length;
-              const totalPages = Math.max(1, Math.ceil(totalEvents / TIMELINE_PAGE_SIZE));
-              const currentPage = Math.min(timelinePage, totalPages - 1);
-              const pageStart = currentPage * TIMELINE_PAGE_SIZE;
-              const pageEnd = Math.min(pageStart + TIMELINE_PAGE_SIZE, totalEvents);
-              const pageEvents = filteredTimeline.slice(pageStart, pageEnd);
-              // Group current page by date
-              const groups = {};
-              for (const ev of pageEvents) {
-                const dateKey = ev.timestamp ? ev.timestamp.slice(0, 10) : "Unknown Date";
-                if (!groups[dateKey]) groups[dateKey] = [];
-                groups[dateKey].push(ev);
-              }
-              // Compute page range for display
-              const maxPageButtons = 7;
-              let pageRangeStart = Math.max(0, currentPage - Math.floor(maxPageButtons / 2));
-              let pageRangeEnd = Math.min(totalPages, pageRangeStart + maxPageButtons);
-              if (pageRangeEnd - pageRangeStart < maxPageButtons) pageRangeStart = Math.max(0, pageRangeEnd - maxPageButtons);
 
-              // Severity counts for filter chips
-              const sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
-              for (const ev of allTimelineEvents) sevCounts[ev.severity] = (sevCounts[ev.severity] || 0) + 1;
-
-              return (
-                <div>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
-                    <h2 style={{ fontSize: 16, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
-                      <Icons.Search /> Event Timeline
-                    </h2>
-                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-muted)" }}>
-                      {totalEvents} events{timelineSevFilter !== "all" ? ` (${timelineSevFilter})` : ""} — showing {totalEvents > 0 ? `${pageStart + 1}–${pageEnd}` : "0"} (page {currentPage + 1}/{totalPages})
-                    </span>
-                  </div>
-
-                  {/* Severity filter bar */}
-                  <div className="filter-bar" style={{ marginBottom: 12 }}>
-                    <span style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>Filter:</span>
-                    {["all", "critical", "high", "medium", "low"].map(f => (
-                      sevCounts[f] > 0 || f === "all" ? (
-                        <button key={f} className={`filter-chip ${timelineSevFilter === f ? "active" : ""}`} onClick={() => { setTimelineSevFilter(f); setTimelinePage(0); }}>
-                          {f === "all" ? `All (${allTimelineEvents.length})` : `${f.charAt(0).toUpperCase() + f.slice(1)} (${sevCounts[f] || 0})`}
-                        </button>
-                      ) : null
-                    ))}
-                  </div>
-
-                  {/* Top pagination */}
-                  {totalPages > 1 && (
-                    <div className="timeline-pagination">
-                      <button disabled={currentPage === 0} onClick={() => setTimelinePage(0)}>«</button>
-                      <button disabled={currentPage === 0} onClick={() => setTimelinePage(currentPage - 1)}>‹</button>
-                      {pageRangeStart > 0 && <span className="page-info">…</span>}
-                      {Array.from({ length: pageRangeEnd - pageRangeStart }, (_, i) => pageRangeStart + i).map(p => (
-                        <button key={p} className={p === currentPage ? "active" : ""} onClick={() => setTimelinePage(p)}>
-                          {p + 1}
-                        </button>
-                      ))}
-                      {pageRangeEnd < totalPages && <span className="page-info">…</span>}
-                      <button disabled={currentPage >= totalPages - 1} onClick={() => setTimelinePage(currentPage + 1)}>›</button>
-                      <button disabled={currentPage >= totalPages - 1} onClick={() => setTimelinePage(totalPages - 1)}>»</button>
-                    </div>
-                  )}
-
-                  <div className="timeline-container">
-                    <div className="timeline-line" />
-                    {Object.entries(groups).map(([date, evts]) => (
-                      <div key={date}>
-                        <div className="timeline-group-header">{date}</div>
-                        {evts.map((ev, idx) => (
-                          <div
-                            key={`${ev.findingId}-${idx}`}
-                            className="timeline-event"
-                            onClick={() => {
-                              const singleEventFinding = {
-                                ...ev.finding,
-                                matchedEvents: ev.event ? [ev.event] : [],
-                                _timelineClick: true
-                              };
-                              openEvidenceViewer(singleEventFinding);
-                            }}
-                          >
-                            <div className="timeline-dot" style={{ background: `var(--severity-${ev.severity})`, boxShadow: `0 0 6px var(--severity-${ev.severity})` }} />
-                            <div className="timeline-time">
-                              {ev.timestamp ? ev.timestamp.slice(11, 23) : "—"}
-                            </div>
-                            <span className={`severity-badge badge-${ev.severity}`} style={{ flexShrink: 0 }}>{ev.severity}</span>
-                            <div className="timeline-finding-name">{ev.findingName}</div>
-                            {ev.eventId && <div className="timeline-event-id">EID: {ev.eventId}</div>}
-                            {ev.recordId && <div className="timeline-record-id">RID: {ev.recordId}</div>}
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Bottom pagination */}
-                  {totalPages > 1 && (
-                    <div className="timeline-pagination">
-                      <button disabled={currentPage === 0} onClick={() => { setTimelinePage(0); window.scrollTo(0, 0); }}>«</button>
-                      <button disabled={currentPage === 0} onClick={() => { setTimelinePage(currentPage - 1); window.scrollTo(0, 0); }}>‹</button>
-                      {pageRangeStart > 0 && <span className="page-info">…</span>}
-                      {Array.from({ length: pageRangeEnd - pageRangeStart }, (_, i) => pageRangeStart + i).map(p => (
-                        <button key={p} className={p === currentPage ? "active" : ""} onClick={() => { setTimelinePage(p); window.scrollTo(0, 0); }}>
-                          {p + 1}
-                        </button>
-                      ))}
-                      {pageRangeEnd < totalPages && <span className="page-info">…</span>}
-                      <button disabled={currentPage >= totalPages - 1} onClick={() => { setTimelinePage(currentPage + 1); window.scrollTo(0, 0); }}>›</button>
-                      <button disabled={currentPage >= totalPages - 1} onClick={() => { setTimelinePage(totalPages - 1); window.scrollTo(0, 0); }}>»</button>
-                      <span className="page-info">Page {currentPage + 1} of {totalPages}</span>
-                    </div>
+              {/* Row 1: Source + Date Range */}
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>SOURCE:</span>
+                  <select
+                    multiple
+                    value={tlFilters.sources}
+                    onChange={(e) => {
+                      const selected = Array.from(e.target.selectedOptions, o => o.value);
+                      applyTlFilters({ ...tlFilters, sources: selected });
+                    }}
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-primary)", borderRadius: 4, fontSize: 11, fontFamily: "var(--font-mono)", padding: "3px 6px", minWidth: 180, maxHeight: 60 }}
+                  >
+                    {tlSources.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  {tlFilters.sources.length > 0 && (
+                    <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 6px" }} onClick={() => applyTlFilters({ ...tlFilters, sources: [] })}>Clear</button>
                   )}
                 </div>
-              );
-            })()}
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>FROM:</span>
+                  <input type="datetime-local" value={tlFilters.date_from?.slice(0, 16) || ""} onChange={(e) => applyTlFilters({ ...tlFilters, date_from: e.target.value ? e.target.value + ":00Z" : "" })}
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-primary)", borderRadius: 4, fontSize: 11, fontFamily: "var(--font-mono)", padding: "3px 6px" }} />
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>TO:</span>
+                  <input type="datetime-local" value={tlFilters.date_to?.slice(0, 16) || ""} onChange={(e) => applyTlFilters({ ...tlFilters, date_to: e.target.value ? e.target.value + ":59Z" : "" })}
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-primary)", borderRadius: 4, fontSize: 11, fontFamily: "var(--font-mono)", padding: "3px 6px" }} />
+                  {(tlFilters.date_from || tlFilters.date_to) && (
+                    <button className="btn btn-ghost" style={{ fontSize: 10, padding: "2px 6px" }} onClick={() => applyTlFilters({ ...tlFilters, date_from: "", date_to: "" })}>Clear</button>
+                  )}
+                </div>
+              </div>
+
+              {/* Row 2: Severity + Event ID + Keyword */}
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>SEVERITY:</span>
+                  {["critical", "high", "medium", "low", "none"].map(sev => {
+                    const active = tlFilters.severities.includes(sev);
+                    return (
+                      <button key={sev}
+                        className={`filter-chip ${active ? "active" : ""}`}
+                        style={{ fontSize: 10, padding: "2px 8px", color: active ? "#fff" : (sevColors[sev] || "var(--text-muted)"), borderColor: sevColors[sev] || "var(--border-primary)" }}
+                        onClick={() => {
+                          const next = active ? tlFilters.severities.filter(s => s !== sev) : [...tlFilters.severities, sev];
+                          applyTlFilters({ ...tlFilters, severities: next });
+                        }}
+                      >
+                        {sev === "none" ? "No Finding" : sev.charAt(0).toUpperCase() + sev.slice(1)}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>EVENT ID:</span>
+                  <input
+                    type="text"
+                    placeholder="e.g. 4624,4625,1102"
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-primary)", borderRadius: 4, fontSize: 11, fontFamily: "var(--font-mono)", padding: "3px 8px", width: 150 }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        const ids = e.target.value.split(",").map(s => s.trim()).filter(Boolean);
+                        applyTlFilters({ ...tlFilters, event_ids: ids });
+                      }
+                    }}
+                    defaultValue={tlFilters.event_ids.join(",")}
+                  />
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1 }}>
+                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", whiteSpace: "nowrap" }}>SEARCH:</span>
+                  <input
+                    type="text"
+                    placeholder="Keyword search across all fields..."
+                    style={{ background: "var(--bg-secondary)", color: "var(--text-primary)", border: "1px solid var(--border-primary)", borderRadius: 4, fontSize: 11, fontFamily: "var(--font-mono)", padding: "3px 8px", flex: 1, minWidth: 150 }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        applyTlFilters({ ...tlFilters, keyword: e.target.value });
+                      }
+                    }}
+                    defaultValue={tlFilters.keyword}
+                  />
+                </div>
+                {(tlFilters.sources.length > 0 || tlFilters.date_from || tlFilters.date_to || tlFilters.severities.length > 0 || tlFilters.event_ids.length > 0 || tlFilters.keyword) && (
+                  <button className="btn btn-ghost" style={{ fontSize: 10, padding: "3px 10px", color: "var(--accent-red)" }}
+                    onClick={() => applyTlFilters({ sources: [], date_from: "", date_to: "", severities: [], event_ids: [], keyword: "" })}>
+                    Reset All Filters
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Loading indicator */}
+            {tlLoading && tlEvents.length === 0 && (
+              <div style={{ textAlign: "center", padding: 40, color: "var(--text-muted)" }}>
+                <div className="spinner" style={{ margin: "0 auto 12px" }} />
+                <p>Loading timeline events...</p>
+              </div>
+            )}
+
+            {/* Empty state */}
+            {!tlLoading && tlEvents.length === 0 && tlInitialized && (
+              <div className="empty-state" style={{ padding: 40 }}>
+                <p>{tlTotal === 0 && !tlFilters.keyword && tlFilters.severities.length === 0 ? "No artifacts uploaded yet. Upload files in the Analyze tab first." : "No events match the current filters."}</p>
+              </div>
+            )}
+
+            {/* Not initialized */}
+            {!tlInitialized && !tlLoading && (
+              <div className="empty-state" style={{ padding: 40 }}>
+                <p>Click the Timeline tab to load all events from your artifacts.</p>
+                <button className="btn btn-primary" style={{ marginTop: 12 }} onClick={() => fetchTimeline(0)}>Load Timeline</button>
+              </div>
+            )}
+
+            {/* Event table with virtual scroll */}
+            {tlEvents.length > 0 && (
+              <div
+                ref={tlContainerRef}
+                onScroll={handleTlScroll}
+                style={{ maxHeight: "calc(100vh - 280px)", overflowY: "auto", border: "1px solid var(--border-primary)", borderRadius: 8, background: "var(--bg-secondary)" }}
+              >
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
+                  <thead style={{ position: "sticky", top: 0, zIndex: 2, background: "var(--bg-tertiary)" }}>
+                    <tr>
+                      <th style={{ width: 40, padding: "6px 4px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", textAlign: "center", borderBottom: "1px solid var(--border-primary)" }}>#</th>
+                      <th style={{ width: 55, padding: "6px 4px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", textAlign: "center", borderBottom: "1px solid var(--border-primary)" }}>Severity</th>
+                      <th style={{ width: 170, padding: "6px 8px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", borderBottom: "1px solid var(--border-primary)" }}>Timestamp</th>
+                      <th style={{ width: 60, padding: "6px 4px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", textAlign: "center", borderBottom: "1px solid var(--border-primary)" }}>Event ID</th>
+                      <th style={{ width: 140, padding: "6px 8px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", borderBottom: "1px solid var(--border-primary)" }}>Source</th>
+                      <th style={{ padding: "6px 8px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", borderBottom: "1px solid var(--border-primary)" }}>Summary</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tlEvents.map((ev, idx) => {
+                      const hasFinding = !!ev.severity;
+                      const sevColor = sevColors[ev.severity] || "transparent";
+                      return (
+                        <tr key={idx} onClick={() => openTimelineEvent(ev)} style={{ borderBottom: "1px solid var(--border-primary)", background: hasFinding ? `${sevColor}08` : "transparent", cursor: "pointer", height: TL_ROW_HEIGHT }}>
+                          <td style={{ padding: "4px", fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", textAlign: "center" }}>{idx + 1}</td>
+                          <td style={{ padding: "4px", textAlign: "center" }}>
+                            {hasFinding ? (
+                              <span style={{ fontSize: 9, fontWeight: 700, padding: "1px 6px", borderRadius: 3, background: `${sevColor}22`, color: sevColor, border: `1px solid ${sevColor}44`, fontFamily: "var(--font-mono)", textTransform: "uppercase" }}>
+                                {ev.severity}
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: 9, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ padding: "4px 8px", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)" }}>
+                            {ev.timestamp ? ev.timestamp.slice(0, 23).replace("T", " ") : "—"}
+                          </td>
+                          <td style={{ padding: "4px", fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--accent-cyan)", textAlign: "center", fontWeight: 600 }}>
+                            {ev.event_id || "—"}
+                          </td>
+                          <td style={{ padding: "4px 8px", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={ev.source}>
+                            {ev.source || "—"}
+                          </td>
+                          <td style={{ padding: "4px 8px", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {hasFinding && <span style={{ color: sevColor, fontWeight: 600, marginRight: 6 }}>[{ev.rule_id}]</span>}
+                            {ev.fields_summary || (ev.content || "").slice(0, 150)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {/* Load more indicator */}
+                {tlOffset < tlTotal && (
+                  <div style={{ textAlign: "center", padding: 12, color: "var(--text-muted)", fontSize: 11 }}>
+                    {tlLoading ? (
+                      <span>Loading more events...</span>
+                    ) : (
+                      <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={loadMoreTimeline}>
+                        Load more ({(tlTotal - tlOffset).toLocaleString()} remaining)
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Timeline Event Detail Modal */}
+            {tlSelectedEvent && (
+              <div className="modal-overlay" onClick={() => setTlSelectedEvent(null)}>
+                <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 900, maxHeight: "85vh", overflow: "auto" }}>
+                  <div className="modal-header">
+                    <div>
+                      <span className={`severity-dot severity-${tlSelectedEvent.event?.severity || ""}`} />
+                      <span style={{ fontSize: 16, fontWeight: 700 }}>Event Details</span>
+                      {tlSelectedEvent.event?.severity && (
+                        <span className={`severity-badge badge-${tlSelectedEvent.event.severity}`} style={{ marginLeft: 8 }}>{tlSelectedEvent.event.severity}</span>
+                      )}
+                      {tlSelectedEvent.event?.rule_name && (
+                        <span style={{ marginLeft: 8, fontSize: 12, color: "var(--accent-cyan)", fontFamily: "var(--font-mono)" }}>{tlSelectedEvent.event.rule_id} — {tlSelectedEvent.event.rule_name}</span>
+                      )}
+                    </div>
+                    <button className="modal-close" onClick={() => setTlSelectedEvent(null)}>×</button>
+                  </div>
+
+                  {tlSelectedEvent.loading ? (
+                    <div style={{ textAlign: "center", padding: 40, color: "var(--text-muted)" }}>
+                      <div className="spinner" style={{ margin: "0 auto 12px" }} />
+                      <p>Loading event details...</p>
+                    </div>
+                  ) : (() => {
+                    const ev = tlSelectedEvent.event || {};
+                    const fields = ev.fields || {};
+                    const isEvtx = tlSelectedEvent.log_type === "windows_event_log";
+                    const isWeb = tlSelectedEvent.log_type === "web_server_log";
+                    return (
+                      <div style={{ padding: "16px 20px" }}>
+                        {/* Metadata grid */}
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginBottom: 16 }}>
+                          {[
+                            ["Source", tlSelectedEvent.source],
+                            ["Record ID", ev.record_id],
+                            ["Event ID", ev.event_id],
+                            ["Timestamp", ev.timestamp],
+                            isEvtx && ["Provider", ev.provider],
+                            isEvtx && ["Channel", ev.channel],
+                            isEvtx && ["Computer", ev.computer],
+                            isWeb && ["IP", fields.ip],
+                            isWeb && ["Method", fields.method],
+                            isWeb && ["URI", fields.uri],
+                            isWeb && ["Status", fields.status],
+                            isWeb && ["User Agent", fields.userAgent],
+                          ].filter(Boolean).filter(([, v]) => v).map(([label, value]) => (
+                            <div key={label} style={{ background: "var(--bg-tertiary)", padding: "8px 12px", borderRadius: 6, border: "1px solid var(--border-primary)" }}>
+                              <div style={{ fontSize: 9, color: "var(--text-muted)", fontFamily: "var(--font-mono)", textTransform: "uppercase", marginBottom: 3 }}>{label}</div>
+                              <div style={{ fontSize: 12, color: "var(--text-primary)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{String(value)}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Structured fields */}
+                        {fields && Object.keys(fields).length > 0 && (
+                          <div style={{ marginBottom: 16 }}>
+                            <h4 style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, fontFamily: "var(--font-mono)" }}>
+                              {isEvtx ? "EVENT DATA FIELDS" : "FIELDS"}
+                            </h4>
+                            <div style={{ background: "var(--bg-tertiary)", borderRadius: 6, border: "1px solid var(--border-primary)", padding: 12, maxHeight: 300, overflow: "auto" }}>
+                              {Object.entries(fields).map(([k, v]) => (
+                                <div key={k} style={{ display: "flex", gap: 8, padding: "3px 0", borderBottom: "1px solid var(--border-primary)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                                  <span style={{ color: "var(--accent-cyan)", minWidth: 160, flexShrink: 0, fontWeight: 600 }}>{k}:</span>
+                                  <span style={{ color: "var(--text-secondary)", wordBreak: "break-all", whiteSpace: "pre-wrap" }}>{String(v)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Full Event XML */}
+                        {ev.event_data_xml && (
+                          <div style={{ marginBottom: 16 }}>
+                            <h4 style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-cyan)", marginBottom: 8, fontFamily: "var(--font-mono)" }}>
+                              {isEvtx ? "FULL EVENT XML" : "RAW DATA"}
+                            </h4>
+                            <pre style={{
+                              background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6,
+                              padding: 14, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)",
+                              whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 400, overflow: "auto", lineHeight: 1.5,
+                            }}>
+                              {ev.event_data_xml}
+                            </pre>
+                          </div>
+                        )}
+
+                        {/* Raw content fallback */}
+                        {!ev.event_data_xml && (ev.content || ev.message) && (
+                          <div>
+                            <h4 style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, fontFamily: "var(--font-mono)" }}>RAW CONTENT</h4>
+                            <pre style={{
+                              background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6,
+                              padding: 14, fontSize: 11, fontFamily: "var(--font-mono)", color: "var(--text-secondary)",
+                              whiteSpace: "pre-wrap", wordBreak: "break-all", maxHeight: 400, overflow: "auto", lineHeight: 1.5,
+                            }}>
+                              {ev.content || ev.message}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            )}
           </div>
-        )}
+          );
+        })()}
 
         {activeTab === "analyze" && (
           <div>

@@ -426,6 +426,7 @@ async def case_upload(file: UploadFile = File(...)):
         conn.execute("UPDATE artifacts SET file_path = ? WHERE id = ?", (jsonl_path, artifact_id))
         conn.commit()
         update_artifact_status(conn, artifact_id, "parsed", len(events))
+        _timeline_cache["case_dir"] = None  # Invalidate timeline cache
 
         print(f"[SIGIL] Uploaded: {filename} → {len(events)} events saved to {jsonl_filename}")
 
@@ -531,6 +532,7 @@ async def case_analyze(
         all_findings = get_all_findings(conn)
         overall_score = compute_overall_score(all_findings)
         insert_overall_score(conn, overall_score)
+        _timeline_cache["case_dir"] = None  # Invalidate timeline cache (severity tags changed)
 
         # Update case metadata timestamp
         if _active_case["metadata"]:
@@ -559,6 +561,244 @@ async def case_analyze(
 
 
 # ═══ BOOKMARKS ═══
+
+# ── Timeline cache (rebuilt per case, invalidated on new uploads) ──
+_timeline_cache = {
+    "case_dir": None,
+    "events": [],        # All events sorted by timestamp, tagged with source + severity
+    "sources": [],       # Unique source filenames
+    "event_ids": [],     # Unique event IDs
+    "total": 0,
+}
+
+
+def _build_timeline_index(conn):
+    """Build a sorted, tagged timeline from all JSONL files. Cached per case."""
+    case_dir = _active_case.get("case_dir", "")
+    if _timeline_cache["case_dir"] == case_dir and _timeline_cache["total"] > 0:
+        return _timeline_cache
+
+    import time
+    start = time.time()
+
+    artifacts = get_all_artifacts(conn)
+    all_findings = get_all_findings(conn)
+
+    # Build a lookup: record_id → finding info (for severity tagging)
+    # Key by (source, record_id) to handle cross-artifact collisions
+    finding_lookup = {}
+    for f in all_findings:
+        severity = f.get("severity", "")
+        rule_id = f.get("rule_id", "")
+        rule_name = f.get("rule_name", f.get("name", ""))
+        for me in f.get("matched_events", []):
+            src = me.get("source", "")
+            rid = str(me.get("record_id", ""))
+            if src and rid:
+                finding_lookup[(src, rid)] = {
+                    "severity": severity,
+                    "rule_id": rule_id,
+                    "rule_name": rule_name,
+                }
+
+    all_events = []
+    sources = set()
+    event_ids_set = set()
+
+    for artifact in artifacts:
+        jsonl_path = artifact.get("file_path", "")
+        if not jsonl_path or not os.path.exists(jsonl_path):
+            continue
+
+        source = artifact["filename"]
+        sources.add(source)
+
+        with open(jsonl_path, "r", encoding="utf-8") as jf:
+            for line in jf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                rid = str(ev.get("record_id", ""))
+                eid = str(ev.get("event_id", ""))
+                if eid:
+                    event_ids_set.add(eid)
+
+                # Check if this event matched a finding
+                match = finding_lookup.get((source, rid))
+
+                all_events.append({
+                    "timestamp": ev.get("timestamp", ""),
+                    "event_id": eid,
+                    "record_id": rid,
+                    "provider": ev.get("provider", ""),
+                    "computer": ev.get("computer", ""),
+                    "channel": ev.get("channel", ""),
+                    "source": source,
+                    "content": (ev.get("content") or ev.get("message", ""))[:300],
+                    "severity": match["severity"] if match else "",
+                    "rule_id": match["rule_id"] if match else "",
+                    "rule_name": match["rule_name"] if match else "",
+                    "fields_summary": _summarize_fields(ev.get("fields", {})),
+                })
+
+    # Sort by timestamp
+    all_events.sort(key=lambda e: e.get("timestamp") or "9999")
+
+    elapsed = time.time() - start
+    _timeline_cache["case_dir"] = case_dir
+    _timeline_cache["events"] = all_events
+    _timeline_cache["sources"] = sorted(sources)
+    _timeline_cache["event_ids"] = sorted(event_ids_set, key=lambda x: int(x) if x.isdigit() else 0)
+    _timeline_cache["total"] = len(all_events)
+
+    print(f"[SIGIL] Timeline index built: {len(all_events)} events from {len(sources)} artifacts in {elapsed:.1f}s")
+    return _timeline_cache
+
+
+def _summarize_fields(fields):
+    """Create a brief summary of key fields for timeline display."""
+    if not fields or not isinstance(fields, dict):
+        return ""
+    parts = []
+    # Prioritize important fields
+    for key in ["TargetUserName", "SubjectUserName", "IpAddress", "ip", "method", "uri", "status",
+                "ScriptBlockText", "CommandLine", "NewProcessName", "ParentProcessName"]:
+        val = fields.get(key, "")
+        if val:
+            val = str(val)[:100]
+            parts.append(f"{key}={val}")
+        if len(parts) >= 3:
+            break
+    return " | ".join(parts)
+
+
+@app.post("/case/timeline")
+async def case_timeline(request: Request):
+    """Get timeline events with server-side filtering and pagination for virtual scroll."""
+    conn = _get_conn()
+    try:
+        body = await request.json()
+        offset = body.get("offset", 0)
+        limit = body.get("limit", 200)
+        filters = body.get("filters", {})
+
+        # Build or use cached timeline index
+        cache = _build_timeline_index(conn)
+        events = cache["events"]
+
+        # Apply filters
+        source_filter = filters.get("sources", [])
+        date_from = filters.get("date_from", "")
+        date_to = filters.get("date_to", "")
+        severity_filter = filters.get("severities", [])
+        event_id_filter = filters.get("event_ids", [])
+        keyword = (filters.get("keyword", "") or "").lower().strip()
+
+        if source_filter or date_from or date_to or severity_filter or event_id_filter or keyword:
+            filtered = []
+            for ev in events:
+                # Source filter
+                if source_filter and ev["source"] not in source_filter:
+                    continue
+                # Date range filter
+                ts = ev.get("timestamp", "")
+                if date_from and ts and ts < date_from:
+                    continue
+                if date_to and ts and ts > date_to:
+                    continue
+                # Severity filter
+                if severity_filter:
+                    ev_sev = ev.get("severity", "") or "none"
+                    if ev_sev not in severity_filter:
+                        continue
+                # Event ID filter
+                if event_id_filter and ev.get("event_id", "") not in event_id_filter:
+                    continue
+                # Keyword search
+                if keyword:
+                    searchable = f"{ev.get('content', '')} {ev.get('provider', '')} {ev.get('computer', '')} {ev.get('fields_summary', '')} {ev.get('rule_name', '')}".lower()
+                    if keyword not in searchable:
+                        continue
+                filtered.append(ev)
+            total_filtered = len(filtered)
+            chunk = filtered[offset:offset + limit]
+        else:
+            total_filtered = cache["total"]
+            chunk = events[offset:offset + limit]
+
+        return {
+            "status": "success",
+            "events": chunk,
+            "total": total_filtered,
+            "offset": offset,
+            "limit": limit,
+            "sources": cache["sources"],
+            "event_ids": cache["event_ids"][:200],  # Cap for UI dropdown
+        }
+    except Exception as e:
+        import traceback
+        return {"status": "error", "message": str(e), "trace": traceback.format_exc()}
+
+
+@app.post("/case/timeline/invalidate")
+async def timeline_invalidate():
+    """Invalidate the timeline cache (called after new uploads or analysis)."""
+    _timeline_cache["case_dir"] = None
+    _timeline_cache["events"] = []
+    _timeline_cache["total"] = 0
+    return {"status": "success"}
+
+
+@app.post("/case/timeline/event")
+async def timeline_event_detail(request: Request):
+    """Fetch full event data from JSONL by source filename and record_id."""
+    conn = _get_conn()
+    try:
+        body = await request.json()
+        source = body.get("source", "")
+        record_id = str(body.get("record_id", ""))
+
+        if not source or not record_id:
+            return {"status": "error", "message": "source and record_id required"}
+
+        # Find the artifact by filename
+        artifacts = get_all_artifacts(conn)
+        artifact = next((a for a in artifacts if a["filename"] == source), None)
+        if not artifact:
+            return {"status": "error", "message": f"Artifact not found: {source}"}
+
+        jsonl_path = artifact.get("file_path", "")
+        if not jsonl_path or not os.path.exists(jsonl_path):
+            return {"status": "error", "message": "JSONL file not found"}
+
+        # Search for the event in the JSONL file
+        with open(jsonl_path, "r", encoding="utf-8") as jf:
+            for line in jf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    if str(ev.get("record_id", "")) == record_id:
+                        return {
+                            "status": "success",
+                            "event": ev,
+                            "source": source,
+                            "log_type": artifact.get("log_type", ""),
+                        }
+                except json.JSONDecodeError:
+                    continue
+
+        return {"status": "error", "message": f"Event with record_id {record_id} not found in {source}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 
 @app.post("/case/bookmark")
 async def case_bookmark(request: Request):

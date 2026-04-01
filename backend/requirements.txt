@@ -22,4 +22,8 @@ starlette==0.38.6
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.30.6
+<<<<<<< HEAD
 zipp==1.0.0
+=======
+zipp==1.0.0
+>>>>>>> 5fd745d78170e27b50afe47b55017bd9d53b0c60

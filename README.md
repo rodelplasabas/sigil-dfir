@@ -1,4 +1,6 @@
-# SIGIL DFIR – Compromise Assessment Tool
+# SIGIL DFIR – Compromise Assessment Tool (Discontinued)
+
+SIGIL is now VESTIGEX. Learn more at https://vestigex.app
 
 SIGIL is an open-source DFIR triage tool designed to help investigators quickly assess potential system compromise using artifacts such as Windows Event Logs, web server logs, and registry data.
 
